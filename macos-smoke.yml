@@ -1,0 +1,60 @@
+name: macOS smoke test
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  macos-smoke:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout test repo (patch + workflow)
+        uses: actions/checkout@v4
+
+      - name: Clone SubScraper from Gitea
+        run: git clone https://git.subnabbit.com/subscraper/subscraper src
+
+      - name: Apply macOS patch
+        run: |
+          cd src
+          git apply ../subscraper-macos.patch
+          echo "Patch applied OK"
+          git status --short | head -20
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish osx-arm64 (GUI + CLI)
+        run: |
+          cd src
+          dotnet publish "SubScraper.Gui/SubScraper.Gui.csproj" -c Release -r osx-arm64 --self-contained -p:PublishSingleFile=true -p:Version=0.0.0-smoke -o outosx-arm64-gui
+          dotnet publish "SubScraper.Cli/SubScraper.Cli.csproj" -c Release -r osx-arm64 --self-contained -p:PublishSingleFile=true -p:Version=0.0.0-smoke -o outosx-arm64-cli
+
+      - name: Verify Mach-O arm64 binaries
+        run: |
+          file src/outosx-arm64-gui/SubScraper.Gui
+          file "src/outosx-arm64-cli/SubScraper.Cli"
+
+      - name: Package SubScraper.app
+        run: |
+          cd src
+          bash scripts/package-macos.sh outosx-arm64-gui "0.0.0-smoke" release-macos
+          test -x "release-macos/SubScraper.app/Contents/MacOS/SubScraper"
+          test -d "release-macos/SubScraper.app/Contents/MacOS/.playwright"
+          echo "--- .app bundle OK ---"
+          ls "release-macos/SubScraper.app/Contents/MacOS"
+
+      - name: CLI smoke test (ffmpeg bootstrap)
+        run: |
+          cd src/outosx-arm64-cli
+          chmod +x SubScraper.Cli
+          timeout 300 ./SubScraper.Cli --non-interactive || true
+          echo "--- ffmpeg bootstrap result ---"
+          FFMPEG_BIN="$HOME/.local/share/SubScraper/ffmpeg/bin/ffmpeg"
+          FFPROBE_BIN="$HOME/.local/share/SubScraper/ffmpeg/bin/ffprobe"
+          ls -la "$FFMPEG_BIN" "$FFPROBE_BIN"
+          file "$FFMPEG_BIN"
+          "$FFMPEG_BIN" -version 2>&1 | head -2

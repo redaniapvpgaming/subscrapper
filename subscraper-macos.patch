@@ -1,0 +1,928 @@
+diff --git a/.gitea/workflows/publish-release.yml b/.gitea/workflows/publish-release.yml
+index cbbf6e0..af912a3 100644
+--- a/.gitea/workflows/publish-release.yml
++++ b/.gitea/workflows/publish-release.yml
+@@ -48,7 +48,7 @@ jobs:
+         with:
+           dotnet-version: '10.0.x'
+ 
+-      - name: Publish self-contained binaries (win-x64 + linux-x64)
++      - name: Publish self-contained binaries (win-x64 + linux-x64 + osx-arm64)
+         env:
+           VERSION: ${{ steps.version.outputs.version }}
+         run: |
+@@ -58,6 +58,8 @@ jobs:
+           dotnet publish "SubScraper.Cli/SubScraper.Cli.csproj" "${COMMON[@]}" -r win-x64   -o outwin-x64-cli
+           dotnet publish "SubScraper.Gui/SubScraper.Gui.csproj" "${COMMON[@]}" -r linux-x64 -o outlin-gui
+           dotnet publish "SubScraper.Cli/SubScraper.Cli.csproj" "${COMMON[@]}" -r linux-x64 -o outlin-cli
++          dotnet publish "SubScraper.Gui/SubScraper.Gui.csproj" "${COMMON[@]}" -r osx-arm64 -o outosx-arm64-gui
++          dotnet publish "SubScraper.Cli/SubScraper.Cli.csproj" "${COMMON[@]}" -r osx-arm64 -o outosx-arm64-cli
+ 
+       - name: Generate default config.conf
+         run: |
+@@ -119,13 +121,43 @@ jobs:
+           tar -czf "../SubScraperV${VERSION}-linux-x64.tar.gz" .
+           cd ..
+ 
++      - name: Package macOS release (osx-arm64)
++        env:
++          VERSION: ${{ steps.version.outputs.version }}
++        run: |
++          set -e
++          # Assemble SubScraper.app from the osx-arm64 publish output.
++          # The script only copies files and writes Info.plist, so it runs on Linux.
++          # Code signing / notarization must happen afterwards on a Mac.
++          bash scripts/package-macos.sh outosx-arm64-gui "$VERSION" release-macos
++          # Classic CLI next to the .app, with its own copies of the runtime files
++          # (the GUI gets them from inside SubScraper.app). Playwright resolves its
++          # driver from AppContext.BaseDirectory, i.e. next to each binary.
++          mv "outosx-arm64-cli/SubScraper.Cli" "release-macos/SubScraper - Classic"
++          chmod +x "release-macos/SubScraper - Classic"
++          cp outosx-arm64-cli/rules.json release-macos/
++          cp -R outosx-arm64-cli/chromium-scripts release-macos/
++          if [ -d outosx-arm64-cli/.playwright ]; then
++            rm -rf outosx-arm64-cli/.playwright/node/win* outosx-arm64-cli/.playwright/node/linux*
++            cp -R outosx-arm64-cli/.playwright release-macos/
++          else
++            cp -R "release-macos/SubScraper.app/Contents/MacOS/.playwright" release-macos/
++          fi
++          cp ./config.conf release-macos/
++          mkdir -p release-macos/cdm/devices/chrome_1610
++          # FFmpeg is provisioned on first run by FfmpegBootstrapService (macOS branch),
++          # or picked up from PATH (e.g. `brew install ffmpeg`).
++          cd release-macos
++          tar -czf "../SubScraperV${VERSION}-osx-arm64.tar.gz" "SubScraper.app" "SubScraper - Classic" .playwright chromium-scripts config.conf rules.json cdm
++          cd ..
++
+       - name: Create release and upload assets
+         uses: ./.gitea-actions/gitea-release-action
+         with:
+           tag: ${{ steps.version.outputs.tag }}
+           title: ${{ steps.version.outputs.version }}
+           draft: false
+-          files: ./SubScraperV${{ steps.version.outputs.version }}-win-x64.zip, ./SubScraperV${{ steps.version.outputs.version }}-linux-x64.tar.gz
++          files: ./SubScraperV${{ steps.version.outputs.version }}-win-x64.zip, ./SubScraperV${{ steps.version.outputs.version }}-linux-x64.tar.gz, ./SubScraperV${{ steps.version.outputs.version }}-osx-arm64.tar.gz
+         env:
+           GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+           GITEA_REPOSITORY: ${{ gitea.repository }}
+diff --git a/SubScraper.Cli/Program.cs b/SubScraper.Cli/Program.cs
+index 92c2391..fd73410 100644
+--- a/SubScraper.Cli/Program.cs
++++ b/SubScraper.Cli/Program.cs
+@@ -229,7 +229,7 @@ public partial class Program(IServiceProvider serviceProvider)
+             }
+ 
+             if (!startupResult.FfmpegFound || !startupResult.FfprobeFound ||
+-                !startupResult.FfmpegIsBtbNBuild)
++                !startupResult.FfmpegIsRecommendedBuild)
+             {
+                 string issue = !startupResult.FfmpegFound && !startupResult.FfprobeFound
+                     ? "FFmpeg and FFprobe could not be found."
+@@ -238,9 +238,12 @@ public partial class Program(IServiceProvider serviceProvider)
+                         : !startupResult.FfprobeFound
+                             ? "FFprobe could not be found."
+                             : "This FFmpeg executable is not a BtbN FFmpeg-Builds release.";
+-                string manualInstructions =
+-                    $"Download a BtbN build from {Constants.BtbNFfmpegReleasesUrl}, extract it, then set " +
+-                    "FFmpegPath and FFprobePath in config.conf to the extracted executables.";
++                string manualInstructions = OperatingSystem.IsMacOS()
++                    ? "Download a macOS build from https://github.com/ffbinaries/ffbinaries-prebuilt/releases, " +
++                      "extract it, then set FFmpegPath and FFprobePath in config.conf to the extracted executables " +
++                      "(or install FFmpeg with `brew install ffmpeg`)."
++                    : $"Download a BtbN build from {Constants.BtbNFfmpegReleasesUrl}, extract it, then set " +
++                      "FFmpegPath and FFprobePath in config.conf to the extracted executables.";
+ 
+                 if (configService.CurrentConfig.NonInteractiveMode)
+                 {
+@@ -273,7 +276,7 @@ public partial class Program(IServiceProvider serviceProvider)
+                 startupResult = await startupService.ValidateEnvironmentAsync();
+                 DisplayStartupResult(startupResult);
+                 if (!startupResult.FfmpegFound || !startupResult.FfprobeFound ||
+-                    !startupResult.FfmpegIsBtbNBuild)
++                    !startupResult.FfmpegIsRecommendedBuild)
+                 {
+                     AnsiConsole.MarkupLine(
+                         "[red]The installed FFmpeg build did not pass startup validation.[/]");
+@@ -987,7 +990,7 @@ public partial class Program(IServiceProvider serviceProvider)
+                 ? $"[green]ffmpeg version detected as {Markup.Escape(result.FfmpegVersion)}[/]\n"
+                 : "[yellow]ffmpeg version could not be parsed[/]\n");
+ 
+-            if (!result.FfmpegIsBtbNBuild)
++            if (!result.FfmpegIsRecommendedBuild)
+             {
+                 AnsiConsole.MarkupLine(
+                     "[yellow]FFmpeg is not a BtbN FFmpeg-Builds release and must be replaced.[/]");
+diff --git a/SubScraper.Core/Helpers/ExternalToolPathHelper.cs b/SubScraper.Core/Helpers/ExternalToolPathHelper.cs
+index 86a77d0..522b0f7 100644
+--- a/SubScraper.Core/Helpers/ExternalToolPathHelper.cs
++++ b/SubScraper.Core/Helpers/ExternalToolPathHelper.cs
+@@ -6,6 +6,11 @@ public static class ExternalToolPathHelper
+ 
+     public const string BundledFfprobeRelativePath = "ffmpeg/bin/ffprobe.exe";
+ 
++    // Manually-bundled layout on macOS (no .exe extension).
++    public const string BundledFfmpegRelativePathMacOS = "ffmpeg/bin/ffmpeg";
++
++    public const string BundledFfprobeRelativePathMacOS = "ffmpeg/bin/ffprobe";
++
+     public static string? ResolveExistingToolPath(string? path)
+     {
+         if (string.IsNullOrWhiteSpace(path))
+diff --git a/SubScraper.Core/Models/StartupResult.cs b/SubScraper.Core/Models/StartupResult.cs
+index 6ce938a..6e2ad95 100644
+--- a/SubScraper.Core/Models/StartupResult.cs
++++ b/SubScraper.Core/Models/StartupResult.cs
+@@ -20,6 +20,13 @@ public class StartupResult
+ 
+     public bool FfmpegIsBtbNBuild { get; set; }
+ 
++    /// <summary>
++    /// Whether the detected FFmpeg may be used on this OS. BtbN builds are required on
++    /// Windows and Linux; on macOS (where BtbN publishes no builds) any working FFmpeg
++    /// qualifies, e.g. the ffbinaries auto-install or a Homebrew install.
++    /// </summary>
++    public bool FfmpegIsRecommendedBuild { get; set; }
++
+     public bool FfprobeFound { get; set; }
+ 
+     public bool FfprobePathAutoDetected { get; set; }
+diff --git a/SubScraper.Core/Services/FfmpegBootstrapService.cs b/SubScraper.Core/Services/FfmpegBootstrapService.cs
+index 362d795..3a52fc9 100644
+--- a/SubScraper.Core/Services/FfmpegBootstrapService.cs
++++ b/SubScraper.Core/Services/FfmpegBootstrapService.cs
+@@ -1,4 +1,5 @@
+ using System.Buffers;
++using System.Buffers.Binary;
+ using System.IO.Compression;
+ using System.Net.Http.Headers;
+ using System.Runtime.InteropServices;
+@@ -22,12 +23,21 @@ public sealed class FfmpegBootstrapService : IFfmpegBootstrapService
+     private const int MaximumReleaseJsonBytes = 2 * 1024 * 1024;
+     private static readonly Uri s_latestReleaseApiUri =
+         new("https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/latest");
++    // ffbinaries publishes macOS builds as plain .zip archives containing a single
++    // Intel 64-bit binary (verified 2026-10-09; BtbN publishes no macOS builds and
++    // ffbinaries has no Apple Silicon native build). On ARM64 Macs the Intel binary
++    // runs via Rosetta 2, which macOS offers to install on first launch.
++    private static readonly Uri s_ffbinariesMacOsFfmpegUri =
++        new("https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v6.1/ffmpeg-6.1-macos-64.zip");
++    private static readonly Uri s_ffbinariesMacOsFfprobeUri =
++        new("https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v6.1/ffprobe-6.1-macos-64.zip");
+     private static readonly HttpClient s_httpClient = CreateHttpClient();
+ 
+     private readonly HttpClient _httpClient;
+     private readonly string _localAppDataPath;
+     private readonly Architecture _osArchitecture;
+     private readonly bool _isWindows;
++    private readonly bool _isMacOS;
+     private readonly long _minimumAssetBytes;
+     private readonly long _maximumAssetBytes;
+ 
+@@ -38,7 +48,8 @@ public sealed class FfmpegBootstrapService : IFfmpegBootstrapService
+             RuntimeInformation.OSArchitecture,
+             OperatingSystem.IsWindows(),
+             DefaultMinimumAssetBytes,
+-            DefaultMaximumAssetBytes)
++            DefaultMaximumAssetBytes,
++            OperatingSystem.IsMacOS())
+     {
+     }
+ 
+@@ -48,22 +59,29 @@ public sealed class FfmpegBootstrapService : IFfmpegBootstrapService
+         Architecture osArchitecture,
+         bool isWindows,
+         long minimumAssetBytes = DefaultMinimumAssetBytes,
+-        long maximumAssetBytes = DefaultMaximumAssetBytes)
++        long maximumAssetBytes = DefaultMaximumAssetBytes,
++        bool isMacOS = false)
+     {
+         _httpClient = httpClient;
+         _localAppDataPath = localAppDataPath;
+         _osArchitecture = osArchitecture;
+         _isWindows = isWindows;
++        _isMacOS = isMacOS;
+         _minimumAssetBytes = minimumAssetBytes;
+         _maximumAssetBytes = maximumAssetBytes;
+     }
+ 
+     public async Task<FfmpegBootstrapResult> EnsureInstalledAsync(CancellationToken cancellationToken = default)
+     {
++        if (_isMacOS)
++        {
++            return await EnsureMacOSInstalledAsync(cancellationToken);
++        }
++
+         if (!_isWindows)
+         {
+             return FfmpegBootstrapResult.Failed(
+-                "Automatic FFmpeg installation is supported only on Windows. Install FFmpeg and FFprobe " +
++                "Automatic FFmpeg installation is supported only on Windows and macOS. Install FFmpeg and FFprobe " +
+                 "with your operating system's package manager or configure their paths manually.");
+         }
+ 
+@@ -166,6 +184,198 @@ public sealed class FfmpegBootstrapService : IFfmpegBootstrapService
+         }
+     }
+ 
++    private async Task<FfmpegBootstrapResult> EnsureMacOSInstalledAsync(CancellationToken cancellationToken)
++    {
++        const string target = "macos-x64";
++
++        if (string.IsNullOrWhiteSpace(_localAppDataPath))
++        {
++            return FfmpegBootstrapResult.Failed(
++                "macOS did not provide a LocalAppData folder, so SubScraper cannot install FFmpeg. " +
++                "Install it with `brew install ffmpeg` or configure FFmpegPath and FFprobePath manually.");
++        }
++
++        string ffmpegRoot = Path.Combine(_localAppDataPath, "SubScraper", "ffmpeg");
++        string installDirectory = Path.Combine(ffmpegRoot, target);
++
++        try
++        {
++            Directory.CreateDirectory(ffmpegRoot);
++            await using FileStream lockFile = await AcquireInstallLockAsync(
++                Path.Combine(ffmpegRoot, $".{target}.lock"), cancellationToken);
++
++            if (TryValidateMacOSInstallation(installDirectory,
++                    out string? cachedFfmpegPath, out string? cachedFfprobePath))
++            {
++                Log.Debug("Using cached FFmpeg tools at {FfmpegDirectory}", installDirectory);
++                return FfmpegBootstrapResult.Succeeded(cachedFfmpegPath!, cachedFfprobePath!, false);
++            }
++
++            string stagingDirectory = Path.Combine(ffmpegRoot, $".{target}-{Guid.NewGuid():N}.tmp");
++            try
++            {
++                Directory.CreateDirectory(stagingDirectory);
++                string stagedInstallDirectory = Path.Combine(stagingDirectory, "install");
++                string binDirectory = Path.Combine(stagedInstallDirectory, "bin");
++                Directory.CreateDirectory(binDirectory);
++
++                await DownloadAndExtractMacOSToolAsync(
++                    s_ffbinariesMacOsFfmpegUri, "ffmpeg", binDirectory, cancellationToken);
++                await DownloadAndExtractMacOSToolAsync(
++                    s_ffbinariesMacOsFfprobeUri, "ffprobe", binDirectory, cancellationToken);
++
++                PromoteInstallation(stagedInstallDirectory, installDirectory);
++
++                if (!TryValidateMacOSInstallation(installDirectory,
++                        out string? ffmpegPath, out string? ffprobePath))
++                {
++                    throw new InvalidDataException("The installed FFmpeg files failed final validation.");
++                }
++
++                Log.Information("Installed FFmpeg tools at {FfmpegDirectory}", installDirectory);
++                return FfmpegBootstrapResult.Succeeded(ffmpegPath!, ffprobePath!, true);
++            }
++            finally
++            {
++                TryDeleteDirectory(stagingDirectory);
++            }
++        }
++        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
++        {
++            throw;
++        }
++        catch (Exception exception)
++        {
++            Log.Error(exception, "Failed to install FFmpeg tools on macOS");
++            string rosettaHint = _osArchitecture == Architecture.Arm64
++                ? " On Apple Silicon Macs the macOS build is Intel-only and requires Rosetta 2 " +
++                  "(`softwareupdate --install-rosetta --agree-to-license`)."
++                : string.Empty;
++            return FfmpegBootstrapResult.Failed(
++                "SubScraper could not install FFmpeg for macOS: " +
++                $"{exception.Message}.{rosettaHint} Alternatively install it with `brew install ffmpeg` " +
++                "or configure FFmpegPath and FFprobePath manually.");
++        }
++    }
++
++    private async Task DownloadAndExtractMacOSToolAsync(
++        Uri downloadUri,
++        string toolName,
++        string binDirectory,
++        CancellationToken cancellationToken)
++    {
++        if (!IsAllowedMacOSDownloadUri(downloadUri))
++        {
++            throw new InvalidDataException($"Refusing to download {toolName} from an unexpected URI.");
++        }
++
++        string archivePath = Path.Combine(binDirectory, $"{toolName}.zip.partial");
++        Log.Information("Downloading {ToolName} for macOS from {DownloadUri}", toolName, downloadUri);
++
++        using HttpRequestMessage request = new(HttpMethod.Get, downloadUri);
++        using HttpResponseMessage response = await _httpClient.SendAsync(
++            request,
++            HttpCompletionOption.ResponseHeadersRead,
++            cancellationToken);
++        response.EnsureSuccessStatusCode();
++
++        await using (Stream source = await response.Content.ReadAsStreamAsync(cancellationToken))
++        await using (FileStream destination = new(
++            archivePath,
++            FileMode.CreateNew,
++            FileAccess.Write,
++            FileShare.None,
++            1024 * 128,
++            FileOptions.Asynchronous | FileOptions.SequentialScan))
++        {
++            await source.CopyToAsync(destination, cancellationToken);
++        }
++
++        long archiveBytes = new FileInfo(archivePath).Length;
++        if (archiveBytes < _minimumAssetBytes || archiveBytes > _maximumAssetBytes)
++        {
++            throw new InvalidDataException(
++                $"The {toolName} download size ({archiveBytes} bytes) is outside the allowed range.");
++        }
++
++        string toolPath = Path.Combine(binDirectory, toolName);
++        using (ZipArchive archive = ZipFile.OpenRead(archivePath))
++        {
++            List<ZipArchiveEntry> matches = [.. archive.Entries.Where(candidate =>
++                string.Equals(candidate.Name, toolName, StringComparison.Ordinal))];
++            if (matches.Count != 1)
++            {
++                throw new InvalidDataException(
++                    $"The {toolName} archive must contain exactly one top-level {toolName} binary.");
++            }
++
++            await CopyEntryAsync(matches[0], toolPath, MaximumExecutableBytes, cancellationToken);
++        }
++
++        File.Delete(archivePath);
++
++        if (!OperatingSystem.IsWindows())
++        {
++            // Zip extraction drops the Unix executable bit; without it macOS refuses to launch the tool.
++            File.SetUnixFileMode(
++                toolPath,
++                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
++                UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
++                UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
++        }
++
++        if (!HasPlausibleExecutableSize(toolPath) || !HasExpectedMachOMagic(toolPath))
++        {
++            throw new InvalidDataException($"The downloaded {toolName} is not a valid macOS executable.");
++        }
++    }
++
++    private static bool IsAllowedMacOSDownloadUri(Uri downloadUri) =>
++        downloadUri.Scheme == Uri.UriSchemeHttps &&
++        string.Equals(downloadUri.Host, "github.com", StringComparison.OrdinalIgnoreCase) &&
++        downloadUri.AbsolutePath.StartsWith(
++            "/ffbinaries/ffbinaries-prebuilt/releases/download/",
++            StringComparison.Ordinal);
++
++    private static bool TryValidateMacOSInstallation(
++        string installDirectory,
++        out string? ffmpegPath,
++        out string? ffprobePath)
++    {
++        ffmpegPath = Path.Combine(installDirectory, "bin", "ffmpeg");
++        ffprobePath = Path.Combine(installDirectory, "bin", "ffprobe");
++        if (HasPlausibleExecutableSize(ffmpegPath) && HasExpectedMachOMagic(ffmpegPath) &&
++            HasPlausibleExecutableSize(ffprobePath) && HasExpectedMachOMagic(ffprobePath))
++        {
++            return true;
++        }
++
++        ffmpegPath = null;
++        ffprobePath = null;
++        return false;
++    }
++
++    private static bool HasExpectedMachOMagic(string path)
++    {
++        try
++        {
++            using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read);
++            Span<byte> magic = stackalloc byte[4];
++            if (stream.Read(magic) != 4)
++            {
++                return false;
++            }
++
++            uint value = BinaryPrimitives.ReadUInt32LittleEndian(magic);
++            // MH_MAGIC_64 (64-bit Mach-O) or FAT_MAGIC (universal binary).
++            return value is 0xFEEDFACF or 0xCAFEBABE;
++        }
++        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
++        {
++            return false;
++        }
++    }
++
+     private static HttpClient CreateHttpClient()
+     {
+         HttpClient client = new(new HttpClientHandler { AllowAutoRedirect = true })
+diff --git a/SubScraper.Core/Services/StartupService.cs b/SubScraper.Core/Services/StartupService.cs
+index f43df70..769d678 100644
+--- a/SubScraper.Core/Services/StartupService.cs
++++ b/SubScraper.Core/Services/StartupService.cs
+@@ -72,7 +72,7 @@ public class StartupService(
+             result.FfprobeVersion = (await GetToolVersionInfoAsync(result.FfprobePath, "ffprobe"))?.Version;
+         }
+ 
+-        if (result.FfmpegFound && !result.FfmpegIsBtbNBuild)
++        if (result.FfmpegFound && !result.FfmpegIsBtbNBuild && !OperatingSystem.IsMacOS())
+         {
+             Log.Warning(
+                 "FFmpeg is not a BtbN FFmpeg-Builds release. Path={FfmpegPath} Version={FfmpegVersion}",
+@@ -80,6 +80,10 @@ public class StartupService(
+                 result.FfmpegVersion);
+         }
+ 
++        // BtbN publishes no macOS builds, so on macOS any working FFmpeg is acceptable
++        // (the ffbinaries auto-install or a Homebrew install). Other platforms require BtbN.
++        result.FfmpegIsRecommendedBuild = result.FfmpegIsBtbNBuild || OperatingSystem.IsMacOS();
++
+         // Widevine device checks
+         result.ClientIdBlobMissing = !File.Exists(Path.Join(WidevineConstants.DEVICES_FOLDER,
+             WidevineConstants.DEVICE_NAME, "device_client_id_blob"));
+@@ -505,10 +509,15 @@ public class StartupService(
+         }
+ 
+         string toolName = Path.GetFileNameWithoutExtension(filename);
++        bool isMacOS = OperatingSystem.IsMacOS();
+         string? bundledRelativePath = toolName switch
+         {
+-            "ffmpeg" => ExternalToolPathHelper.BundledFfmpegRelativePath,
+-            "ffprobe" => ExternalToolPathHelper.BundledFfprobeRelativePath,
++            "ffmpeg" => isMacOS
++                ? ExternalToolPathHelper.BundledFfmpegRelativePathMacOS
++                : ExternalToolPathHelper.BundledFfmpegRelativePath,
++            "ffprobe" => isMacOS
++                ? ExternalToolPathHelper.BundledFfprobeRelativePathMacOS
++                : ExternalToolPathHelper.BundledFfprobeRelativePath,
+             _ => null
+         };
+         string? bundledPath = ExternalToolPathHelper.ResolveExistingToolPath(bundledRelativePath);
+diff --git a/SubScraper.Gui/Program.cs b/SubScraper.Gui/Program.cs
+index f4f0195..1a61036 100644
+--- a/SubScraper.Gui/Program.cs
++++ b/SubScraper.Gui/Program.cs
+@@ -17,6 +17,16 @@ public static class Program
+     {
+         try
+         {
++            // A macOS .app launched from Finder starts with the filesystem root ("/") as the
++            // working directory, but SubScraper resolves its runtime files (config.conf,
++            // rules.json, auth.json, ...) relative to it. Anchor it to the bundle's MacOS
++            // directory in that case so a double-clicked .app behaves like the Windows .exe.
++            // (When launched from a terminal the shell's working directory is preserved.)
++            if (OperatingSystem.IsMacOS() && Directory.GetCurrentDirectory() == "/")
++            {
++                Directory.SetCurrentDirectory(AppContext.BaseDirectory);
++            }
++
+             // Parse command line arguments
+             HidePrivateInfo = args.Contains("--hide-private-info", StringComparer.OrdinalIgnoreCase);
+ 
+diff --git a/SubScraper.Gui/ViewModels/MainWindowViewModel.cs b/SubScraper.Gui/ViewModels/MainWindowViewModel.cs
+index 33f3bb4..18ecc00 100644
+--- a/SubScraper.Gui/ViewModels/MainWindowViewModel.cs
++++ b/SubScraper.Gui/ViewModels/MainWindowViewModel.cs
+@@ -805,7 +805,7 @@ public partial class MainWindowViewModel(
+ 
+         try
+         {
+-            AppendLog("Installing the recommended BtbN FFmpeg build...");
++            AppendLog($"Installing the recommended {RecommendedFfmpegBuildName} FFmpeg build...");
+             FfmpegBootstrapResult result = await startupService.InstallRecommendedFfmpegAsync();
+             if (!result.Success)
+             {
+@@ -815,8 +815,8 @@ public partial class MainWindowViewModel(
+ 
+             IsFfmpegBuildWarningModalOpen = false;
+             AppendLog(result.Downloaded
+-                ? "Installed the recommended BtbN FFmpeg build."
+-                : "Selected the cached recommended BtbN FFmpeg build.");
++                ? $"Installed the recommended {RecommendedFfmpegBuildName} FFmpeg build."
++                : $"Selected the cached recommended {RecommendedFfmpegBuildName} FFmpeg build.");
+             await BeginStartupAsync();
+         }
+         catch (Exception ex)
+@@ -839,8 +839,9 @@ public partial class MainWindowViewModel(
+ 
+         IsFfmpegBuildWarningModalOpen = false;
+         BuildConfigFields(configService.CurrentConfig);
+-        ConfigScreenMessage =
+-            "Download and extract a BtbN build, select its FFmpeg and FFprobe executables below, then save.";
++        ConfigScreenMessage = OperatingSystem.IsMacOS()
++            ? "Download and extract a macOS FFmpeg build (or `brew install ffmpeg`), select its FFmpeg and FFprobe executables below, then save."
++            : "Download and extract a BtbN build, select its FFmpeg and FFprobe executables below, then save.";
+         CurrentScreen = AppScreen.Config;
+     }
+ 
+@@ -1876,7 +1877,7 @@ public partial class MainWindowViewModel(
+         }
+ 
+         if (!_startupResult.FfmpegFound || !_startupResult.FfprobeFound ||
+-            !_startupResult.FfmpegIsBtbNBuild)
++            !_startupResult.FfmpegIsRecommendedBuild)
+         {
+             ShowFfmpegRepairRequired(_startupResult);
+             return false;
+@@ -1915,6 +1916,9 @@ public partial class MainWindowViewModel(
+     private bool CanFixFfmpegAutomatically() =>
+         IsFfmpegBuildWarningModalOpen && !IsFfmpegRepairInProgress;
+ 
++    private static string RecommendedFfmpegBuildName =>
++        OperatingSystem.IsMacOS() ? "ffbinaries" : "BtbN";
++
+     private void ShowSiteConfigurationRequired(StartupResult startupResult)
+     {
+         string validationError = startupResult.SiteConfigError ??
+diff --git a/SubScraper.Gui/Views/FaqWindow.axaml.cs b/SubScraper.Gui/Views/FaqWindow.axaml.cs
+index 6f28f62..7e121d1 100644
+--- a/SubScraper.Gui/Views/FaqWindow.axaml.cs
++++ b/SubScraper.Gui/Views/FaqWindow.axaml.cs
+@@ -54,6 +54,7 @@ public partial class FaqWindow : Window
+ 
+         bool isDocker = EnvironmentHelper.IsRunningInDocker();
+         bool isWindows = EnvironmentHelper.IsRunningOnWindows();
++        bool isMacOS = OperatingSystem.IsMacOS();
+ 
+         Entries.Add(new FaqEntry(
+             "Why are some users missing from the users list?",
+@@ -114,6 +115,19 @@ public partial class FaqWindow : Window
+                         "https://github.com/BtbN/FFmpeg-Builds/releases")
+                 ]));
+         }
++        else if (isMacOS)
++        {
++            Entries.Add(new FaqEntry(
++                "Why am I seeing a FFmpeg or FFprobe is missing error?",
++                [
++                    "On macOS, SubScraper downloads a macOS FFmpeg and FFprobe build on first use, then reuses the per-user cached copy. The first installation requires an internet connection. The macOS build is Intel-only, so Apple Silicon Macs also need Rosetta 2 (macOS offers to install it automatically).",
++                    "If installation fails, check your internet connection and security software. Clear FFmpeg Path and FFprobe Path in the \"External\" section of \"Configuration\" to retry automatic installation, install FFmpeg with Homebrew (`brew install ffmpeg`), or set both fields to executables you installed manually."
++                ],
++                [
++                    new FaqLink("ffbinaries releases",
++                        "https://github.com/ffbinaries/ffbinaries-prebuilt/releases")
++                ]));
++        }
+         else
+         {
+             Entries.Add(new FaqEntry(
+diff --git a/SubScraper.Tests/Services/FfmpegBootstrapServiceTests.cs b/SubScraper.Tests/Services/FfmpegBootstrapServiceTests.cs
+index eb3c58c..a050386 100644
+--- a/SubScraper.Tests/Services/FfmpegBootstrapServiceTests.cs
++++ b/SubScraper.Tests/Services/FfmpegBootstrapServiceTests.cs
+@@ -201,6 +201,92 @@ public class FfmpegBootstrapServiceTests
+         Assert.Equal(2, requestCount);
+     }
+ 
++    [Fact]
++    public async Task EnsureInstalledAsync_DownloadsMacOSBinariesAndUsesCacheWithoutRedownload()
++    {
++        using TempFolder temp = new();
++        byte[] ffmpegArchive = CreateMacOSToolArchive("ffmpeg");
++        byte[] ffprobeArchive = CreateMacOSToolArchive("ffprobe");
++        int requestCount = 0;
++        using HttpClient httpClient = new(new StubHttpMessageHandler(request =>
++        {
++            requestCount++;
++            string url = request.RequestUri?.AbsoluteUri ?? string.Empty;
++            byte[] archive = url.Contains("ffprobe", StringComparison.OrdinalIgnoreCase)
++                ? ffprobeArchive
++                : ffmpegArchive;
++            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(archive) };
++        }));
++        FfmpegBootstrapService service = new(
++            httpClient,
++            temp.Path,
++            Architecture.Arm64,
++            false,
++            1,
++            5 * 1024 * 1024,
++            isMacOS: true);
++
++        FfmpegBootstrapResult firstResult = await service.EnsureInstalledAsync();
++        FfmpegBootstrapResult secondResult = await service.EnsureInstalledAsync();
++
++        Assert.True(firstResult.Success);
++        Assert.True(firstResult.Downloaded);
++        Assert.True(File.Exists(firstResult.FfmpegPath));
++        Assert.True(File.Exists(firstResult.FfprobePath));
++        if (!OperatingSystem.IsWindows())
++        {
++            UnixFileMode mode = File.GetUnixFileMode(firstResult.FfmpegPath!);
++            Assert.True((mode & UnixFileMode.UserExecute) != 0);
++        }
++
++        Assert.True(secondResult.Success);
++        Assert.False(secondResult.Downloaded);
++        Assert.Equal(firstResult.FfmpegPath, secondResult.FfmpegPath);
++        Assert.Equal(2, requestCount);
++    }
++
++    [Fact]
++    public async Task EnsureInstalledAsync_RejectsMacOSBinaryWithInvalidMagic()
++    {
++        using TempFolder temp = new();
++        byte[] badArchive = CreateMacOSToolArchive("ffmpeg", withValidMagic: false);
++        using HttpClient httpClient = new(new StubHttpMessageHandler(_ =>
++            new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(badArchive) }));
++        FfmpegBootstrapService service = new(
++            httpClient,
++            temp.Path,
++            Architecture.X64,
++            false,
++            1,
++            5 * 1024 * 1024,
++            isMacOS: true);
++
++        FfmpegBootstrapResult result = await service.EnsureInstalledAsync();
++
++        Assert.False(result.Success);
++        Assert.Contains("not a valid macOS executable", result.Error);
++    }
++
++    [Fact]
++    public async Task EnsureInstalledAsync_MacOSWithoutLocalAppDataGuidesToHomebrew()
++    {
++        using HttpClient httpClient = new(new StubHttpMessageHandler(_ =>
++            throw new InvalidOperationException("Network access was not expected.")));
++        FfmpegBootstrapService service = new(
++            httpClient,
++            string.Empty,
++            Architecture.Arm64,
++            false,
++            1,
++            5 * 1024 * 1024,
++            isMacOS: true);
++
++        FfmpegBootstrapResult result = await service.EnsureInstalledAsync();
++
++        Assert.False(result.Success);
++        Assert.Contains("brew install ffmpeg", result.Error);
++    }
++
+     [Fact]
+     public void WindowsPeArchitectureHelper_RejectsDifferentNativeMachine()
+     {
+@@ -212,6 +298,32 @@ public class FfmpegBootstrapServiceTests
+         Assert.False(WindowsPeArchitectureHelper.IsCompatible(executablePath, Architecture.Arm64));
+     }
+ 
++    private static byte[] CreateMacOSToolArchive(string toolName, bool withValidMagic = true)
++    {
++        using MemoryStream destination = new();
++        using (ZipArchive archive = new(destination, ZipArchiveMode.Create, true))
++        {
++            AddEntry(archive, toolName, CreateMacOSBinary(withValidMagic));
++        }
++
++        return destination.ToArray();
++    }
++
++    private static byte[] CreateMacOSBinary(bool withValidMagic)
++    {
++        byte[] contents = new byte[1024 * 1024];
++        if (withValidMagic)
++        {
++            // MH_MAGIC_64 (64-bit Mach-O, little-endian).
++            contents[0] = 0xCF;
++            contents[1] = 0xFA;
++            contents[2] = 0xED;
++            contents[3] = 0xFE;
++        }
++
++        return contents;
++    }
++
+     private static byte[] CreateArchive(Architecture architecture)
+     {
+         using MemoryStream destination = new();
+diff --git a/docs/installation/macos.md b/docs/installation/macos.md
+index ea06d58..3d45ffa 100644
+--- a/docs/installation/macos.md
++++ b/docs/installation/macos.md
+@@ -1,8 +1,86 @@
+-﻿# macOS
++# macOS
+ 
+-macOS releases of SubScraper are not available at this time, however you can run SubScraper on macOS using Docker.
+-Please refer to the [Docker](/installation/docker) page for instructions on how to run SubScraper in a Docker container.
+-If you do not have Docker installed, you can download it from [here](https://docs.docker.com/desktop/install/mac-install/).
++## Requirements
++
++- macOS 13 (Ventura) or later, on Apple Silicon or Intel.
++- An internet connection the first time SubScraper needs to install FFmpeg and FFprobe.
++
++## Installation
++
++1. Navigate to the SubScraper [releases page](https://git.subnabbit.com/subscraper/SubScraper/releases), and download the latest
++   `SubScraperVx.x.x-osx-arm64.tar.gz` release. Use this package on both Apple Silicon and Intel Macs; on Intel Macs the
++   app runs under Rosetta 2.
++2. Extract the archive. Your folder should contain `SubScraper.app`, `.playwright`, and `cdm` folders as well as the
++   main files below:
++    - SubScraper.app
++    - SubScraper - Classic
++    - config.conf
++    - rules.json
++3. Before the first run, open `config.conf` and configure the required `Site.BaseUrl` and `Site.DrmCdnHost` values. See the
++   [configuration reference](/config/configuration) for details. The application stops at startup while either value is blank.
++4. Once you have done this, open SubScraper.app (or run `SubScraper - Classic` from Terminal for the classic,
++   text-based version of SubScraper).
++
++!!! warning "Unidentified developer"
++
++    Until SubScraper ships signed releases, macOS Gatekeeper blocks the app with *"SubScraper can't be opened because
++    the developer cannot be verified"*. To open it anyway, right-click (or Control-click) `SubScraper.app`, choose
++    **Open**, then choose **Open** again in the dialog. macOS remembers your choice afterwards. Alternatively, run
++    `xattr -cr /path/to/SubScraper.app` in Terminal to clear the quarantine flag.
++
++## FFmpeg installation
++
++When FFmpeg Path and FFprobe Path are blank, missing, or invalid, SubScraper offers to install FFmpeg automatically.
++On macOS it downloads the current macOS build from
++[ffbinaries](https://github.com/ffbinaries/ffbinaries-prebuilt/releases) (version 6.1, Intel 64-bit) and caches it under
++`~/.local/share/SubScraper/ffmpeg/macos-x64`, reusing it on later runs.
++
++!!! note "Apple Silicon"
++
++    The macOS FFmpeg build is Intel-only: on Apple Silicon Macs it runs through Rosetta 2. If Rosetta is not installed,
++    macOS offers to install it the first time the tools run; you can also install it yourself beforehand with
++    `softwareupdate --install-rosetta --agree-to-license`.
++
++If you prefer, install FFmpeg yourself with [Homebrew](https://brew.sh) (`brew install ffmpeg`) and leave the paths
++blank: SubScraper detects the Homebrew installation automatically. You can also set FFmpeg Path and FFprobe Path
++manually in `config.conf`.
++
++## Docker
++
++You can also run SubScraper on macOS using Docker. Please refer to the [Docker](/installation/docker) page for
++instructions on how to run SubScraper in a Docker container. If you do not have Docker installed, you can download it
++from [here](https://docs.docker.com/desktop/install/mac-install/).
+ 
+ The official Docker image supports both Intel Macs (`linux/amd64`) and Apple Silicon Macs (`linux/arm64`). Docker
+ Desktop selects the correct image automatically; no `--platform` option or Rosetta emulation is required.
++
++## Building from source
++
++- Install the [.NET 10 SDK](https://learn.microsoft.com/en-us/dotnet/core/install/macos) and
++  [Homebrew FFmpeg](https://brew.sh) (`brew install ffmpeg`).
++- Clone the repo
++
++```bash
++git clone https://git.subnabbit.com/subscraper/SubScraper.git
++cd 'SubScraper'
++```
++
++- Publish the app. Replace `%VERSION%` with the current version number of SubScraper (e.g. `1.9.20`).
++
++    - Modern graphical version (recommended)
++    ```bash
++    dotnet publish "SubScraper.Gui/SubScraper.Gui.csproj" -p:Version=%VERSION% -p:PackageVersion=%VERSION% -c Release -r osx-arm64 --self-contained
++    ```
++
++    - Classic text-based version
++    ```bash
++    dotnet publish "SubScraper.Cli/SubScraper.Cli.csproj" -p:Version=%VERSION% -p:PackageVersion=%VERSION% -c Release -r osx-arm64 --self-contained
++    ```
++
++- (Optional) Assemble the `.app` bundle:
++
++```bash
++bash scripts/package-macos.sh outosx-arm64-gui %VERSION% .
++```
++
++- Run `SubScraper.app` (or the CLI binary from the publish output directory).
+diff --git a/docs/operation/classic-version.md b/docs/operation/classic-version.md
+index dbbd261..6e83d69 100644
+--- a/docs/operation/classic-version.md
++++ b/docs/operation/classic-version.md
+@@ -15,7 +15,8 @@ FFmpeg and FFprobe build automatically when no custom paths are configured. The
+ access; later runs reuse the per-user cached copy. If a media tool still cannot be located, review the installation error,
+ clear an invalid custom path to retry, or configure the path to a manually installed executable.
+ 
+-The classic app also verifies that both tools can start and that FFmpeg is a BtbN build. Interactive runs offer
++The classic app also verifies that both tools can start and that FFmpeg is a BtbN build (on macOS, where BtbN
++publishes no builds, any working FFmpeg is accepted). Interactive runs offer
+ **Fix automatically** or **Fix manually and exit** when tools are missing, paths are invalid, the pair is incomplete,
+ or another build is found. Non-interactive runs exit with instructions to set `FFmpegPath` and `FFprobePath` to
+ executables from the same BtbN archive.
+diff --git a/docs/operation/modern-version.md b/docs/operation/modern-version.md
+index f231d72..041ee64 100644
+--- a/docs/operation/modern-version.md
++++ b/docs/operation/modern-version.md
+@@ -13,7 +13,9 @@ At startup, SubScraper verifies that FFmpeg and FFprobe can be started and that
+ [BtbN FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds/releases). Missing tools, invalid paths, an incomplete pair,
+ or another FFmpeg build pause startup at an **FFmpeg Setup Required** dialog. Choose **Fix automatically** to install
+ and configure the recommended Windows build, or **Fix manually** to open the release page and select both executable
+-paths on the configuration screen.
++paths on the configuration screen. On macOS, where BtbN publishes no builds, any working FFmpeg is accepted: automatic
++setup installs the [ffbinaries](https://github.com/ffbinaries/ffbinaries-prebuilt/releases) macOS build, and a
++Homebrew install (`brew install ffmpeg`) is detected automatically.
+ 
+ If required values are missing from the `Site` section, startup pauses at a **Site Configuration Required** dialog.
+ Choose **Join Discord** to join the [SubScraper Discord server](https://discord.gg/9SvcGChnMR), then choose
+diff --git a/scripts/Info.plist b/scripts/Info.plist
+new file mode 100644
+index 0000000..1b64316
+--- /dev/null
++++ b/scripts/Info.plist
+@@ -0,0 +1,30 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++    <key>CFBundleDevelopmentRegion</key>
++    <string>en</string>
++    <key>CFBundleExecutable</key>
++    <string>SubScraper</string>
++    <key>CFBundleIdentifier</key>
++    <string>com.subnabbit.subscraper</string>
++    <key>CFBundleInfoDictionaryVersion</key>
++    <string>6.0</string>
++    <key>CFBundleName</key>
++    <string>SubScraper</string>
++    <key>CFBundleDisplayName</key>
++    <string>SubScraper</string>
++    <key>CFBundlePackageType</key>
++    <string>APPL</string>
++    <key>CFBundleShortVersionString</key>
++    <string>@VERSION@</string>
++    <key>CFBundleVersion</key>
++    <string>@VERSION@</string>
++    <key>LSMinimumSystemVersion</key>
++    <string>13.0</string>
++    <key>NSHighResolutionCapable</key>
++    <true/>
++    <key>NSPrincipalClass</key>
++    <string>NSApplication</string>
++</dict>
++</plist>
+diff --git a/scripts/package-macos.sh b/scripts/package-macos.sh
+new file mode 100755
+index 0000000..1d06bda
+--- /dev/null
++++ b/scripts/package-macos.sh
+@@ -0,0 +1,61 @@
++#!/usr/bin/env bash
++#
++# Assemble SubScraper.app for macOS from a `dotnet publish -r osx-arm64`
++# (or osx-x64) output directory.
++#
++# Usage:
++#   scripts/package-macos.sh <publish-dir> <version> [output-dir]
++#
++#   <publish-dir>  dotnet publish output, e.g. outosx-arm64-gui
++#   <version>      release version, e.g. 1.9.20 (goes into Info.plist)
++#   [output-dir]   directory in which SubScraper.app is created (default: .)
++#
++# This script only copies files and writes Info.plist, so it runs on any OS
++# (Linux CI included). Code signing and notarization must happen afterwards
++# on a Mac with an Apple Developer ID (see docs/installation/macos.md).
++
++set -euo pipefail
++
++PUBLISH_DIR="${1:?usage: package-macos.sh <publish-dir> <version> [output-dir]}"
++VERSION="${2:?usage: package-macos.sh <publish-dir> <version> [output-dir]}"
++OUT_DIR="${3:-.}"
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++
++APP_DIR="$OUT_DIR/SubScraper.app"
++CONTENTS_DIR="$APP_DIR/Contents"
++MACOS_DIR="$CONTENTS_DIR/MacOS"
++RESOURCES_DIR="$CONTENTS_DIR/Resources"
++
++if [ ! -d "$PUBLISH_DIR" ]; then
++    echo "error: publish directory not found: $PUBLISH_DIR" >&2
++    exit 1
++fi
++
++rm -rf "$APP_DIR"
++mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
++
++# 1. Published binaries and content (Avalonia assets, .playwright drivers,
++#    chromium-scripts, rules.json, ...).
++cp -R "$PUBLISH_DIR/." "$MACOS_DIR/"
++
++# 2. Keep only the macOS Playwright drivers.
++rm -rf "$MACOS_DIR/.playwright"/node/win* "$MACOS_DIR/.playwright"/node/linux*
++
++# 3. Friendly executable name (matches CFBundleExecutable in Info.plist).
++if [ -f "$MACOS_DIR/SubScraper.Gui" ]; then
++    mv "$MACOS_DIR/SubScraper.Gui" "$MACOS_DIR/SubScraper"
++fi
++
++# 4. Info.plist with the release version.
++sed -e "s/@VERSION@/$VERSION/g" "$SCRIPT_DIR/Info.plist" > "$CONTENTS_DIR/Info.plist"
++
++# 5. Icon (optional: drop a SubScraper.icns next to this script to include it).
++if [ -f "$SCRIPT_DIR/SubScraper.icns" ]; then
++    cp "$SCRIPT_DIR/SubScraper.icns" "$RESOURCES_DIR/SubScraper.icns"
++fi
++
++# 6. Drop debug symbols and ensure the executable bit survives tar transport.
++rm -f "$MACOS_DIR"/*.pdb
++chmod +x "$MACOS_DIR/SubScraper"
++
++echo "Created $APP_DIR"
