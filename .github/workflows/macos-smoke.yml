@@ -209,11 +209,12 @@ jobs:
           namespace SubScraper.Tests.Services;
           public class RealMacOSBrowserTypingTests
           {
-              // Headful typing proof: same launch path as the app's browser login
-              // (LaunchPersistentContextAsync + Headless=false + Channel="chromium").
-              // Passes only if Chromium really opens and accepts input.
+              // Headful typing proof on the REAL OnlyFans login page: same launch
+              // path as the app's browser login (LaunchPersistentContextAsync +
+              // Headless=false + Channel="chromium"). Types a dummy address into
+              // the Email field; nothing is submitted.
               [Fact]
-              public async Task HeadfulChromium_OpensVisibleWindowAndAcceptsTyping()
+              public async Task HeadfulChromium_TypesIntoRealLoginEmailField()
               {
                   string userDataDir = Path.Combine(Path.GetTempPath(), "pw-typing-" + Guid.NewGuid().ToString("N"));
                   try
@@ -232,10 +233,11 @@ jobs:
                               Channel = "chromium",
                           });
                       IPage page = await context.NewPageAsync();
-                      await page.GotoAsync("data:text/html,<html><body style='margin:40px'><h1>SubScraper macOS</h1><input id='q' style='font-size:32px;width:500px'></body></html>");
-                      await page.FillAsync("#q", "typing works OK");
-                      string value = await page.InputValueAsync("#q");
-                      Assert.Equal("typing works OK", value);
+                      await page.GotoAsync("https://onlyfans.com");
+                      try { await page.GetByText("ONLY NECESSARY COOKIES").ClickAsync(new() { Timeout = 5000 }); } catch { }
+                      var email = page.GetByPlaceholder("Email");
+                      await email.FillAsync("prueba@muse.test");
+                      Assert.Equal("prueba@muse.test", await email.InputValueAsync());
                       await page.ScreenshotAsync(new PageScreenshotOptions { Path = "/tmp/browser-login-typing.png" });
                   }
                   finally
