@@ -599,6 +599,93 @@ jobs:
           osascript -e 'tell application "Terminal" to quit' 2>/dev/null || true
           rm -f auth.json users.db
 
+      - name: Download Purchased Tab test (macOS)
+        env:
+          CDM_BLOB_B64: ${{ secrets.CDM_CLIENT_ID_BLOB_B64 }}
+          CDM_KEY_B64: ${{ secrets.CDM_PRIVATE_KEY_B64 }}
+        run: |
+          # Verifies real downloads work on macOS: Classic in non-interactive
+          # purchased-tab mode inside Terminal.app, progress screenshots,
+          # then inspects downloaded files + logs.
+          if [ ! -f /tmp/e2e-auth.json ]; then
+            echo "SKIP: no e2e auth.json"
+            exit 0
+          fi
+          if [ -z "$CDM_BLOB_B64" ] || [ -z "$CDM_KEY_B64" ]; then
+            echo "SKIP: CDM secrets not set (DRM downloads need them)"
+            exit 0
+          fi
+          cd "$GITHUB_WORKSPACE/release-macos"
+          cp /tmp/e2e-auth.json auth.json
+          chmod 600 auth.json
+          rm -rf logs users.db
+          # CDM keys BEFORE the download (DRM-protected videos need them)
+          mkdir -p cdm/devices/chrome_1610
+          printf '%s' "$CDM_BLOB_B64" | base64 -d > cdm/devices/chrome_1610/device_client_id_blob
+          printf '%s' "$CDM_KEY_B64" | base64 -d > cdm/devices/chrome_1610/device_private_key
+          test -s cdm/devices/chrome_1610/device_client_id_blob
+          test -s cdm/devices/chrome_1610/device_private_key
+          echo "OK: CDM keys placed for download test"
+          cp config.conf /tmp/config.conf.bak
+          cat >> config.conf <<'EOF'
+          Interaction {
+            NonInteractiveMode = true
+            NonInteractiveModePurchasedTab = true
+          }
+          EOF
+          cat > /tmp/terminal-download.sh <<EOF
+          #!/bin/bash
+          cd "$GITHUB_WORKSPACE/release-macos"
+          env -u GITHUB_ACTIONS -u CI "./SubScraper - Classic" --non-interactive
+          EOF
+          chmod +x /tmp/terminal-download.sh
+          # Real-time progress: stream the Serilog log into the Actions output
+          # so the download can be watched live in the run view.
+          mkdir -p logs
+          LOGFILE="logs/SubScraper$(date +%Y%m%d).txt"
+          touch "$LOGFILE"
+          tail -n +1 -f "$LOGFILE" &
+          TAIL_PID=$!
+          open -a Terminal /tmp/terminal-download.sh \
+            && echo "OK: Terminal.app launched for download test" \
+            || echo "WARN: Terminal launch failed"
+          sleep 8
+          osascript -e 'tell application "Terminal" to set bounds of front window to {100, 80, 1120, 820}' 2>/dev/null || true
+          osascript -e 'tell application "Terminal" to activate' 2>/dev/null || true
+          # Let it download ~9 minutes, screenshotting progress
+          for i in 1 2 3; do
+            sleep 180
+            screencapture -x /tmp/download-progress-$i.png 2>/dev/null \
+              && echo "OK: progress screenshot $i saved" \
+              || echo "WARN: progress screenshot $i failed"
+          done
+          kill $TAIL_PID 2>/dev/null || true
+          echo "=== downloaded files ==="
+          find . -path ./ffmpeg -prune -o -path ./.playwright -prune -o -type f -newer /tmp/config.conf.bak -print 2>/dev/null | grep -v -E "^\./(logs|chromium-data)" | head -30
+          echo "--- total new files:"
+          find . -path ./ffmpeg -prune -o -path ./.playwright -prune -o -type f -newer /tmp/config.conf.bak -print 2>/dev/null | grep -v -E "^\./(logs|chromium-data)" | wc -l
+          pkill -f "SubScraper - Classic" 2>/dev/null || true
+          sleep 2
+          osascript -e 'tell application "Terminal" to quit' 2>/dev/null || true
+          echo "=== log tail (download activity) ==="
+          LOGFILE=$(ls -t logs/SubScraper*.txt 2>/dev/null | head -1)
+          if [ -n "$LOGFILE" ]; then
+            grep -a -i -m25 "downloaded\|downloading\|purchased\|saved to" "$LOGFILE" | head -25
+          else
+            echo "(no log file)"
+          fi
+          # Restore config and clean test leftovers (assembly rebuilds config anyway)
+          cp /tmp/config.conf.bak config.conf
+          rm -rf auth.json users.db logs
+
+      - name: Upload download test screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: download-test-screenshots
+          path: /tmp/download-progress-*.png
+          if-no-files-found: warn
+
       - name: Upload console menu screenshot
         if: always()
         uses: actions/upload-artifact@v4
