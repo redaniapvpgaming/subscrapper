@@ -394,6 +394,21 @@ jobs:
           if grep -q "/opt/homebrew" /tmp/final-shipped-test.txt; then echo "FAIL: Homebrew ffmpeg leaked in"; exit 1; fi
           grep -q 'Name = "OnlyFans"' /tmp/final-test/config.conf || { echo "FAIL: shipped config missing OnlyFans"; exit 1; }
           echo "OK: shipped tarball works standalone with bundled ffmpeg"
+          # Simulate Finder double-click: run the .command launcher from a DIFFERENT cwd
+          # (Finder opens .command files with cwd=$HOME, not the package dir)
+          cd /tmp
+          rm -f /tmp/config.conf
+          set +e
+          "/tmp/final-test/SubScraper - Classic.command" --non-interactive > /tmp/command-test.txt 2>&1
+          COMMAND_CODE=$?
+          set -e
+          cat /tmp/command-test.txt
+          echo "launcher exit=$COMMAND_CODE"
+          if [ "$COMMAND_CODE" -eq 4 ]; then echo "FAIL: launcher did not pass ffmpeg gate"; exit 1; fi
+          grep -q "ffmpeg/bin/ffmpeg" /tmp/command-test.txt || { echo "FAIL: launcher did not use bundled ffmpeg"; exit 1; }
+          grep -q "9\.0\." /tmp/command-test.txt || { echo "FAIL: launcher did not detect 9.x"; exit 1; }
+          test ! -f /tmp/config.conf || { echo "FAIL: launcher created stray config.conf in wrong cwd"; exit 1; }
+          echo "OK: double-click launcher works (correct cwd, bundled ffmpeg, no stray files)"
 
       - name: Create GitHub Release (direct .tar.gz download)
         env:
