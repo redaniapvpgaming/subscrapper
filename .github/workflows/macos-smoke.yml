@@ -299,6 +299,14 @@ jobs:
           test -s cdm/devices/chrome_1610/device_client_id_blob
           test -s cdm/devices/chrome_1610/device_private_key
           echo "OK: CDM keys placed"
+          # Double-click launcher for Classic (cd to package dir first, then run)
+          cat > "SubScraper - Classic.command" <<'EOF'
+          #!/bin/bash
+          cd "$(dirname "$0")"
+          exec "./SubScraper - Classic" "$@"
+          EOF
+          chmod +x "SubScraper - Classic.command"
+          echo "OK: Classic double-click launcher created"
           cd "$GITHUB_WORKSPACE"
           tar -czf SubScraperV1.0.13-osx-arm64.tar.gz -C release-macos .
           ls -la SubScraperV1.0.13-osx-arm64.tar.gz
@@ -320,7 +328,8 @@ jobs:
                    "./SubScraper.app/Contents/MacOS/ffmpeg/bin/ffmpeg" \
                    "./SubScraper.app/Contents/MacOS/ffmpeg/bin/ffprobe" \
                    "./SubScraper.app/Contents/MacOS/SubScraper" \
-                   "./SubScraper - Classic"; do
+                   "./SubScraper - Classic" \
+                   "./SubScraper - Classic.command"; do
             grep -qxF "$f" /tmp/tarlist.txt || { echo "FAIL: missing $f"; exit 1; }
           done
           echo "OK: all expected files present"
@@ -361,6 +370,7 @@ jobs:
           test -x /tmp/final-test/ffmpeg/bin/ffmpeg || { echo "FAIL: ffmpeg exec permission lost in tarball"; exit 1; }
           test -x /tmp/final-test/ffmpeg/bin/ffprobe || { echo "FAIL: ffprobe exec permission lost in tarball"; exit 1; }
           test -x /tmp/final-test/SubScraper.app/Contents/MacOS/SubScraper || { echo "FAIL: GUI exec permission lost in tarball"; exit 1; }
+          test -x "/tmp/final-test/SubScraper - Classic.command" || { echo "FAIL: Classic launcher exec permission lost in tarball"; exit 1; }
           echo "OK: exec permissions preserved through tarball"
           # .app bundle intact in the shipped artifact
           APP="/tmp/final-test/SubScraper.app"
@@ -397,6 +407,6 @@ jobs:
           fi
           gh release create "$TAG" \
             --title "SubScraper v1.0.13 macOS Apple Silicon" \
-            --notes "SubScraper for macOS 13+ (Apple Silicon arm64). Contents: SubScraper.app (GUI), SubScraper Classic (CLI), bundled ffmpeg/ffprobe 9.0.2 arm64, OnlyFans site config, CDM device keys. Install: tar -xzf SubScraperV1.0.13-osx-arm64.tar.gz" \
+            --notes "SubScraper for macOS 13+ (Apple Silicon arm64). Contents: SubScraper.app (GUI), SubScraper Classic (CLI), Classic double-click launcher, bundled ffmpeg/ffprobe 9.0.2 arm64, OnlyFans site config, CDM device keys. Install: tar -xzf SubScraperV1.0.13-osx-arm64.tar.gz" \
             SubScraperV1.0.13-osx-arm64.tar.gz
           echo "Direct download: https://github.com/Lkas2412/subscrapper/releases/download/$TAG/SubScraperV1.0.13-osx-arm64.tar.gz"
