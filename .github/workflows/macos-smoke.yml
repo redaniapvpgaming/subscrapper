@@ -235,8 +235,16 @@ jobs:
                       IPage page = await context.NewPageAsync();
                       await page.GotoAsync("https://onlyfans.com");
                       try { await page.GetByText("ONLY NECESSARY COOKIES").ClickAsync(new() { Timeout = 5000 }); } catch { }
-                      var email = page.GetByPlaceholder("Email");
-                      await email.FillAsync("prueba@muse.test");
+                      // Diagnostics: dump the real input markup (placeholder="Email"
+                      // did not exist in the last run) plus a screenshot, so the
+                      // next iteration targets the exact field if this still fails.
+                      string inputs = await page.EvaluateAsync<string>(
+                          "() => JSON.stringify([...document.querySelectorAll('input')].map(i => ({type: i.type, ph: i.placeholder || null, name: i.name || null, id: i.id || null, visible: i.offsetParent !== null})))");
+                      Console.WriteLine("PAGE INPUTS: " + inputs);
+                      Console.WriteLine("PAGE TITLE: " + await page.TitleAsync() + " URL: " + page.Url);
+                      await page.ScreenshotAsync(new PageScreenshotOptions { Path = "/tmp/browser-login-page.png" });
+                      var email = page.Locator("input[placeholder*='mail' i], input[type='email']").First;
+                      await email.FillAsync("prueba@muse.test", new() { Timeout = 15000 });
                       Assert.Equal("prueba@muse.test", await email.InputValueAsync());
                       await page.ScreenshotAsync(new PageScreenshotOptions { Path = "/tmp/browser-login-typing.png" });
                   }
