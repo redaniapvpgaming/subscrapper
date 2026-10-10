@@ -164,3 +164,28 @@ jobs:
           if [ "$CODE" -eq 4 ]; then echo "FAIL: ffmpeg startup gate not passed"; exit 1; fi
           if grep -q "could not be found" /tmp/cli-out.txt; then echo "FAIL: ffmpeg reported missing"; exit 1; fi
           echo "OK: ffmpeg gate passed (auth failure expected without credentials)"
+
+      - name: Browser auth flow trigger (no credentials, interactive)
+        run: |
+          cd "$GITHUB_WORKSPACE/release-macos"
+          rm -f auth.json
+          export PATH="$(cat /tmp/ffbin-dir.txt):$PATH"
+          ./"SubScraper - Classic" < /dev/null > /tmp/browser-test.txt 2>&1 &
+          PID=$!
+          for i in $(seq 1 90); do
+            if ! kill -0 $PID 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          kill $PID 2>/dev/null || true
+          wait $PID 2>/dev/null || true
+          cat /tmp/browser-test.txt
+          echo "=== log file ==="
+          cat logs/SubScraper.txt 2>/dev/null | tail -30 || echo "(no log file)"
+          if grep -q "Preparing the browser" /tmp/browser-test.txt; then
+            echo "OK: browser auth flow triggered (headful launch attempted - no display in CI as expected)"
+          else
+            echo "FAIL: browser auth flow never triggered"
+            exit 1
+          fi
