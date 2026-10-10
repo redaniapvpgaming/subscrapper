@@ -20,8 +20,10 @@ jobs:
       - name: Apply macOS patch
         run: |
           cd src
-          git apply --check ../subscraper-macos.patch
-          git apply ../subscraper-macos.patch
+          # Docs hunks are excluded: upstream edits docs independently and they
+          # don't affect the build. Code hunks must still apply cleanly.
+          git apply --check --exclude='docs/*' ../subscraper-macos.patch
+          git apply --exclude='docs/*' ../subscraper-macos.patch
 
       - name: Verify macOS patch applied
         run: |
