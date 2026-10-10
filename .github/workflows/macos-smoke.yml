@@ -46,6 +46,17 @@ jobs:
           grep -q "AuthSyncService" SubScraper.Cli/Program.cs
           echo "OK: webhook patch markers present"
 
+      - name: Apply TEMPORARY diagnostic patch (PurchasedTab API response)
+        run: |
+          cd src
+          # TEMPORARY: logs raw API list count + response types to confirm
+          # whether OnlyFans returns empty for datacenter IPs.
+          # Remove this step after the diagnosis.
+          git apply --check ../subscraper-diag-purchased.patch
+          git apply ../subscraper-diag-purchased.patch
+          grep -q "DIAG PurchasedTab" SubScraper.Core/Services/ApiService.cs
+          echo "OK: diagnostic patch applied"
+
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
         with:
