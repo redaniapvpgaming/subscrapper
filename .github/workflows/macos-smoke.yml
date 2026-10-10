@@ -72,7 +72,7 @@ jobs:
       - name: Test real ffmpeg bootstrap (new macOS code path)
         run: |
           cat > src/SubScraper.Tests/Services/RealMacOSBootstrapTests.cs <<'EOF'
-          using SubScraper.Core.Services;
+          using SubScraper.Services;
           namespace SubScraper.Tests.Services;
           public class RealMacOSBootstrapTests
           {
