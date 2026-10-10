@@ -84,6 +84,9 @@ jobs:
                   Assert.True(result.Success, $"bootstrap failed: {result.Error}");
                   Assert.True(File.Exists(result.FfmpegPath), "ffmpeg missing");
                   Assert.True(File.Exists(result.FfprobePath), "ffprobe missing");
+                  Console.WriteLine($"FFMPEG_PATH={result.FfmpegPath}");
+                  Console.WriteLine($"FFPROBE_PATH={result.FfprobePath}");
+                  File.WriteAllText("/tmp/ffbin-dir.txt", Path.GetDirectoryName(result.FfmpegPath)!);
                   foreach (string? path in new[] { result.FfmpegPath, result.FfprobePath })
                   {
                       byte[] magic = new byte[4];
@@ -103,7 +106,8 @@ jobs:
 
       - name: Verify bootstrapped Mach-O ffmpeg
         run: |
-          BIN="$HOME/.local/share/SubScraper/ffmpeg/bin"
+          BIN="$(cat /tmp/ffbin-dir.txt)"
+          echo "ffmpeg bin dir: $BIN"
           ls -la "$BIN/ffmpeg" "$BIN/ffprobe"
           file "$BIN/ffmpeg"
           test -x "$BIN/ffmpeg" && test -x "$BIN/ffprobe"
@@ -112,7 +116,7 @@ jobs:
       - name: CLI startup gate (ffmpeg on PATH)
         run: |
           cd "$GITHUB_WORKSPACE/release-macos"
-          export PATH="$HOME/.local/share/SubScraper/ffmpeg/bin:$PATH"
+          export PATH="$(cat /tmp/ffbin-dir.txt):$PATH"
           cp "$GITHUB_WORKSPACE/outosx-arm64-cli/SubScraper.Cli" "./SubScraper - Classic"
           mkdir -p chromium-scripts
           cp "$GITHUB_WORKSPACE/src/chromium-scripts/stealth.min.js" ./chromium-scripts/ 2>/dev/null || true
