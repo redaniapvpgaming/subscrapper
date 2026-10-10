@@ -1,0 +1,136 @@
+name: macOS Intel test build
+
+# TEST BUILD for Intel macOS (x86_64) - e.g. VMware VMs.
+# Does NOT touch the arm64 release workflow. Trigger manually only.
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-intel-test:
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out test repo
+        uses: actions/checkout@v4
+
+      - name: Clone SubScraper source
+        run: git clone https://git.subnabbit.com/subscraper/subscraper src
+
+      - name: Apply macOS patch
+        run: |
+          cd src
+          git apply --check --exclude='docs/*' ../subscraper-macos.patch
+          git apply --exclude='docs/*' ../subscraper-macos.patch
+          echo "OK: macOS patch applied"
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish GUI (osx-x64)
+        run: |
+          cd src
+          dotnet publish SubScraper.Gui/SubScraper.Gui.csproj \
+            -c Release -r osx-x64 --self-contained \
+            -p:PublishSingleFile=true \
+            -o ../outosx-x64-gui
+
+      - name: Publish Classic CLI (osx-x64)
+        run: |
+          cd src
+          dotnet publish SubScraper.Cli/SubScraper.Cli.csproj \
+            -c Release -r osx-x64 --self-contained \
+            -p:PublishSingleFile=true \
+            -o ../outosx-x64-cli
+
+      - name: Verify Mach-O x86_64 binaries
+        run: |
+          file outosx-x64-gui/SubScraper.Gui | grep -q "x86_64" || { echo "FAIL: GUI is not x86_64"; exit 1; }
+          file outosx-x64-cli/SubScraper.Cli | grep -q "x86_64" || { echo "FAIL: CLI is not x86_64"; exit 1; }
+          test -x outosx-x64-gui/SubScraper.Gui || { echo "FAIL: GUI not executable"; exit 1; }
+          test -x outosx-x64-cli/SubScraper.Cli || { echo "FAIL: CLI not executable"; exit 1; }
+          echo "OK: both binaries are Mach-O x86_64 with exec permission"
+
+      - name: Verify Playwright driver is darwin-x64
+        run: |
+          ls outosx-x64-cli/.playwright/node/ || { echo "FAIL: .playwright/node missing"; exit 1; }
+          test -d outosx-x64-cli/.playwright/node/darwin-x64 || { echo "FAIL: darwin-x64 driver missing"; exit 1; }
+          test ! -e outosx-x64-cli/.playwright/node/darwin-arm64 || { echo "FAIL: darwin-arm64 leaked into x64 build"; exit 1; }
+          test -x outosx-x64-cli/.playwright/node/darwin-x64/node || { echo "FAIL: darwin-x64 node not executable"; exit 1; }
+          echo "OK: Playwright driver is darwin-x64 only"
+
+      - name: Bundle Intel ffmpeg/ffprobe
+        run: |
+          mkdir -p intel-test/ffmpeg/bin
+          curl -fsSL -o /tmp/ffmpeg-intel.zip "https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffmpeg.zip"
+          curl -fsSL -o /tmp/ffprobe-intel.zip "https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffprobe.zip"
+          unzip -o -q /tmp/ffmpeg-intel.zip -d /tmp/ffintel
+          unzip -o -q /tmp/ffprobe-intel.zip -d /tmp/ffintel
+          cp /tmp/ffintel/ffmpeg /tmp/ffintel/ffprobe intel-test/ffmpeg/bin/
+          chmod +x intel-test/ffmpeg/bin/ffmpeg intel-test/ffmpeg/bin/ffprobe
+          file intel-test/ffmpeg/bin/ffmpeg | grep -q "x86_64" || { echo "FAIL: ffmpeg not x86_64"; exit 1; }
+          file intel-test/ffmpeg/bin/ffprobe | grep -q "x86_64" || { echo "FAIL: ffprobe not x86_64"; exit 1; }
+          echo "OK: bundled ffmpeg/ffprobe are native x86_64"
+
+      - name: Bundle SQLite native library (Intel)
+        run: |
+          SQLITE_DYLIB=$(find "$HOME/.nuget/packages/sqlitepclraw.lib.e_sqlite3" \
+            -path "*runtimes/osx-x64/native/libe_sqlite3.dylib" 2>/dev/null | head -1)
+          test -f "$SQLITE_DYLIB" || { echo "FAIL: libe_sqlite3.dylib (osx-x64) not found"; exit 1; }
+          file "$SQLITE_DYLIB" | grep -q "x86_64" || { echo "FAIL: sqlite dylib not x86_64"; exit 1; }
+          cp "$SQLITE_DYLIB" intel-test/
+          echo "OK: libe_sqlite3.dylib (osx-x64) bundled"
+
+      - name: Assemble Intel test tarball
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/intel-test/cdm/devices/chrome_1610"
+          cp "$GITHUB_WORKSPACE/outosx-x64-cli/SubScraper.Cli" "$GITHUB_WORKSPACE/intel-test/SubScraper - Classic"
+          cp "$GITHUB_WORKSPACE/outosx-x64-gui/SubScraper.Gui" "$GITHUB_WORKSPACE/intel-test/SubScraper.Gui"
+          chmod +x "$GITHUB_WORKSPACE/intel-test/SubScraper - Classic" "$GITHUB_WORKSPACE/intel-test/SubScraper.Gui"
+          rm -rf "$GITHUB_WORKSPACE/intel-test/.playwright"
+          cp -R "$GITHUB_WORKSPACE/outosx-x64-cli/.playwright" "$GITHUB_WORKSPACE/intel-test/"
+          cat > "$GITHUB_WORKSPACE/intel-test/config.conf" <<'EOF'
+          Site {
+            Name = "OnlyFans"
+            BaseUrl = "https://onlyfans.com"
+            ApiPath = "/api2/v2"
+            DrmCdnHost = "cdn2.onlyfans.com"
+          }
+          Auth {
+            DisableBrowserAuth = false
+          }
+          Download {
+            DownloadPath = ""
+          }
+          Logging {
+            LoggingLevel = "error"
+          }
+          EOF
+          find "$GITHUB_WORKSPACE/src" -maxdepth 3 -name "rules.json" -exec cp {} "$GITHUB_WORKSPACE/intel-test/" \; 2>/dev/null || echo "(rules.json not in source, skipping)"
+          find "$GITHUB_WORKSPACE/src" -maxdepth 3 -type d -name "chromium-scripts" -exec cp -R {} "$GITHUB_WORKSPACE/intel-test/" \; 2>/dev/null || echo "(chromium-scripts not in source, skipping)"
+          cat > "$GITHUB_WORKSPACE/intel-test/SubScraper - Classic.command" <<'EOF'
+          #!/bin/bash
+          cd "$(dirname "$0")"
+          ./"SubScraper - Classic"
+          EOF
+          chmod +x "$GITHUB_WORKSPACE/intel-test/SubScraper - Classic.command"
+          echo "=== intel-test layout ==="
+          ls -la "$GITHUB_WORKSPACE/intel-test/"
+          echo "OK: Intel test layout assembled"
+
+      - name: Create Intel test tarball
+        run: |
+          cd "$GITHUB_WORKSPACE/intel-test"
+          tar -czf /tmp/SubScraperV1.0.13-osx-x64-TEST.tar.gz .
+          ls -lh /tmp/SubScraperV1.0.13-osx-x64-TEST.tar.gz
+          echo "OK: test tarball created"
+
+      - name: Upload Intel test build
+        uses: actions/upload-artifact@v4
+        with:
+          name: SubScraperV1.0.13-osx-x64-TEST
+          path: /tmp/SubScraperV1.0.13-osx-x64-TEST.tar.gz
+          if-no-files-found: error
