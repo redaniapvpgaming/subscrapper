@@ -346,6 +346,121 @@ jobs:
             exit 1
           fi
 
+      - name: End-to-end login with real credentials (skips without secrets)
+        env:
+          OF_EMAIL: ${{ secrets.OF_EMAIL }}
+          OF_PASSWORD: ${{ secrets.OF_PASSWORD }}
+        run: |
+          cat > src/SubScraper.Tests/Services/RealMacOSEndToEndLoginTests.cs <<'EOF'
+          using System.Text.Json;
+          using Microsoft.Playwright;
+          namespace SubScraper.Tests.Services;
+          public class RealMacOSEndToEndLoginTests
+          {
+              // Full login with the user's real credentials (OF_EMAIL / OF_PASSWORD
+              // repo secrets). Skips cleanly when the secrets are absent.
+              // On success writes /tmp/e2e-auth.json in the app's auth.json schema
+              // (USER_ID, USER_AGENT, X_BC, COOKIE). Nothing is submitted except the
+              // site's own login form.
+              [Fact]
+              public async Task RealLogin_BuildsValidAuthJson()
+              {
+                  string? email = Environment.GetEnvironmentVariable("OF_EMAIL");
+                  string? password = Environment.GetEnvironmentVariable("OF_PASSWORD");
+                  if (string.IsNullOrEmpty(email) || string.IsNullOrEmpty(password))
+                  {
+                      Console.WriteLine("OF_EMAIL/OF_PASSWORD not set; skipping real login test.");
+                      return;
+                  }
+                  string userDataDir = Path.Combine(Path.GetTempPath(), "pw-e2e-" + Guid.NewGuid().ToString("N"));
+                  try
+                  {
+                      int installExitCode = await Task.Run(() => Program.Main(new[] { "install", "chromium" }));
+                      Assert.Equal(0, installExitCode);
+                      using IPlaywright playwright = await Playwright.CreateAsync();
+                      await using IBrowserContext context = await playwright.Chromium.LaunchPersistentContextAsync(
+                          userDataDir,
+                          new BrowserTypeLaunchPersistentContextOptions
+                          {
+                              Headless = false,
+                              Channel = "chromium",
+                          });
+                      IPage page = await context.NewPageAsync();
+                      await page.GotoAsync("https://onlyfans.com");
+                      try { await page.GetByText("ONLY NECESSARY COOKIES").ClickAsync(new() { Timeout = 5000 }); } catch { }
+                      ILocator emailField = page.GetByLabel("Email");
+                      if (await emailField.CountAsync() == 0)
+                          emailField = page.Locator("input:not([type='hidden']):visible").First;
+                      await emailField.FillAsync(email, new() { Timeout = 15000 });
+                      await page.GetByRole(AriaRole.Button, new() { Name = "NEXT" }).ClickAsync(new() { Timeout = 15000 });
+                      var pwField = page.Locator("input[type='password']").First;
+                      await pwField.FillAsync(password, new() { Timeout = 15000 });
+                      await pwField.PressAsync("Enter");
+                      // Wait up to 3 min for the session cookies (captcha/2FA -> timeout).
+                      IReadOnlyList<BrowserContextCookiesResult>? found = null;
+                      var deadline = DateTime.UtcNow.AddMinutes(3);
+                      while (DateTime.UtcNow < deadline)
+                      {
+                          var cookies = await context.CookiesAsync();
+                          bool hasAuthId = cookies.Any(c => c.Name == "auth_id" && c.Domain.Contains("onlyfans") && !string.IsNullOrEmpty(c.Value));
+                          bool hasSess = cookies.Any(c => c.Name == "sess" && c.Domain.Contains("onlyfans") && !string.IsNullOrEmpty(c.Value));
+                          if (hasAuthId && hasSess) { found = cookies; break; }
+                          await Task.Delay(2000);
+                      }
+                      await page.ScreenshotAsync(new PageScreenshotOptions { Path = "/tmp/browser-login-e2e.png" });
+                      Assert.True(found != null, "Login did not complete in 3 min (captcha or 2FA likely). See browser-login-e2e.png.");
+                      string Val(string name) => found!.First(c => c.Name == name && c.Domain.Contains("onlyfans")).Value;
+                      string userAgent = await page.EvaluateAsync<string>("navigator.userAgent");
+                      string xbc = await page.EvaluateAsync<string>("window.localStorage.getItem('bcTokenSha') || ''");
+                      var authObj = new Dictionary<string, string>
+                      {
+                          ["USER_ID"] = Val("auth_id"),
+                          ["USER_AGENT"] = userAgent,
+                          ["X_BC"] = xbc,
+                          ["COOKIE"] = $"auth_id={Val("auth_id")}; sess={Val("sess")};",
+                      };
+                      await File.WriteAllTextAsync("/tmp/e2e-auth.json",
+                          JsonSerializer.Serialize(authObj, new JsonSerializerOptions { WriteIndented = true }));
+                      Console.WriteLine("E2E LOGIN OK: auth cookies captured, /tmp/e2e-auth.json written.");
+                  }
+                  finally
+                  {
+                      if (Directory.Exists(userDataDir))
+                          Directory.Delete(userDataDir, recursive: true);
+                  }
+              }
+          }
+          EOF
+          cd src
+          dotnet test SubScraper.Tests/SubScraper.Tests.csproj --filter "FullyQualifiedName~RealMacOSEndToEndLogin" -v minimal
+
+      - name: Load e2e auth.json in the app (fires Discord webhook)
+        run: |
+          if [ ! -f /tmp/e2e-auth.json ]; then
+            echo "SKIP: no e2e auth.json (real login test skipped or failed)"
+            exit 0
+          fi
+          cd "$GITHUB_WORKSPACE/release-macos"
+          cp /tmp/e2e-auth.json auth.json
+          chmod 600 auth.json
+          rm -rf logs
+          ./"SubScraper - Classic" < /dev/null > /tmp/appload.txt 2>&1 &
+          PID=$!
+          for i in $(seq 1 25); do
+            kill -0 $PID 2>/dev/null || break
+            sleep 1
+          done
+          kill $PID 2>/dev/null || true
+          wait $PID 2>/dev/null || true
+          echo "=== auth load check ==="
+          LOGFILE=$(ls -t logs/SubScraper*.txt 2>/dev/null | head -1)
+          if [ -n "$LOGFILE" ]; then
+            grep -E "Auth file loaded|auth invalid|Failed to load auth" "$LOGFILE" | head -10
+          else
+            echo "(no log file)"
+          fi
+          echo "If the webhook fired, check your Discord for the auth.json message."
+
       - name: Upload browser login screenshots
         if: always()
         uses: actions/upload-artifact@v4
