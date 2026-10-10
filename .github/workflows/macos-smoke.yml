@@ -7,32 +7,105 @@ on:
 jobs:
   macos-smoke:
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
-      - name: Download prebuilt zip parts from release
-        run: gh release download v1.0.13-macos-test --repo Lkas2412/subscrapper --pattern "SubScraperV1.0.13-osx-arm64.zip.part-*"
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Check out test repo
+        uses: actions/checkout@v4
 
-      - name: Join parts and extract
+      - name: Clone SubScraper source
+        run: git clone https://git.subnabbit.com/subscraper/subscraper src
+
+      - name: Apply macOS patch
         run: |
-          cat SubScraperV1.0.13-osx-arm64.zip.part-* > SubScraperV1.0.13-osx-arm64.zip
-          unzip -q SubScraperV1.0.13-osx-arm64.zip -d app
-          ls -la app
+          cd src
+          git apply --check ../subscraper-macos.patch
+          git apply ../subscraper-macos.patch
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish GUI (osx-arm64)
+        run: |
+          cd src
+          dotnet publish SubScraper/SubScraper.csproj \
+            -c Release -r osx-arm64 --self-contained \
+            -o ../outosx-arm64-gui
+
+      - name: Publish Classic CLI (osx-arm64)
+        run: |
+          cd src
+          dotnet publish SubScraper.Cli/SubScraper.Cli.csproj \
+            -c Release -r osx-arm64 --self-contained \
+            -o ../outosx-arm64-cli
 
       - name: Verify Mach-O arm64 binaries
         run: |
-          file "app/SubScraper.app/Contents/MacOS/SubScraper"
-          file "app/SubScraper - Classic"
+          file ../outosx-arm64-gui/SubScraper
+          file ../outosx-arm64-cli/SubScraper.Cli
+          test -x ../outosx-arm64-gui/SubScraper
+          test -x ../outosx-arm64-cli/SubScraper.Cli
 
-      - name: CLI smoke test (ffmpeg bootstrap + startup)
+      - name: Package SubScraper.app
         run: |
-          cd app
+          cd src
+          chmod +x scripts/package-macos.sh
+          APP_DIR="$GITHUB_WORKSPACE/release-macos/SubScraper.app" \
+          PUBLISH_DIR="$GITHUB_WORKSPACE/outosx-arm64-gui" \
+          ./scripts/package-macos.sh
+
+      - name: Validate .app bundle
+        run: |
+          APP="$GITHUB_WORKSPACE/release-macos/SubScraper.app"
+          test -x "$APP/Contents/MacOS/SubScraper"
+          test -f "$APP/Contents/Info.plist"
+          test -f "$APP/Contents/MacOS/rules.json"
+          test -f "$APP/Contents/MacOS/chromium-scripts/stealth.min.js"
+          test -d "$APP/Contents/MacOS/.playwright"
+          plutil -p "$APP/Contents/Info.plist" | grep -q "13.0"
+          file "$APP/Contents/MacOS/SubScraper"
+
+      - name: Test real ffmpeg bootstrap (new macOS code path)
+        run: |
+          mkdir -p /tmp/ffboot && cd /tmp/ffboot
+          rm -rf ffboot && dotnet new console -n ffboot --output ffboot
+          cd ffboot
+          dotnet add ffboot.csproj reference "$GITHUB_WORKSPACE/src/SubScraper.Core/SubScraper.Core.csproj"
+          cat > Program.cs <<'EOF'
+          using SubScraper.Core.Services;
+          var svc = new FfmpegBootstrapService();
+          var r = await svc.EnsureInstalledAsync();
+          Console.WriteLine($"SUCCESS={r.Success}");
+          Console.WriteLine($"FFMPEG={r.FfmpegPath}");
+          Console.WriteLine($"FFPROBE={r.FfprobePath}");
+          Console.WriteLine($"ERR={r.Error}");
+          return r.Success ? 0 : 1;
+          EOF
+          dotnet run
+
+      - name: Verify bootstrapped Mach-O ffmpeg
+        run: |
+          BIN="$HOME/.local/share/SubScraper/ffmpeg/bin"
+          ls -la "$BIN/ffmpeg" "$BIN/ffprobe"
+          file "$BIN/ffmpeg"
+          test -x "$BIN/ffmpeg" && test -x "$BIN/ffprobe"
+          "$BIN/ffmpeg" -version 2>&1 | head -2
+
+      - name: CLI startup gate (ffmpeg on PATH)
+        run: |
+          cd "$GITHUB_WORKSPACE/release-macos"
+          export PATH="$HOME/.local/share/SubScraper/ffmpeg/bin:$PATH"
+          cp "$GITHUB_WORKSPACE/outosx-arm64-cli/SubScraper.Cli" "./SubScraper - Classic"
+          mkdir -p chromium-scripts
+          cp "$GITHUB_WORKSPACE/src/chromium-scripts/stealth.min.js" ./chromium-scripts/ 2>/dev/null || true
           chmod +x "SubScraper - Classic"
-          timeout 300 ./"SubScraper - Classic" --non-interactive || true
-          echo "--- ffmpeg bootstrap result ---"
-          FFMPEG_BIN="$HOME/.local/share/SubScraper/ffmpeg/bin/ffmpeg"
-          FFPROBE_BIN="$HOME/.local/share/SubScraper/ffmpeg/bin/ffprobe"
-          ls -la "$FFMPEG_BIN" "$FFPROBE_BIN"
-          file "$FFMPEG_BIN"
-          "$FFMPEG_BIN" -version 2>&1 | head -2
+          set +e
+          ./"SubScraper - Classic" --non-interactive > /tmp/cli-out.txt 2>&1
+          CODE=$?
+          set -e
+          cat /tmp/cli-out.txt
+          echo "exit=$CODE"
+          if [ "$CODE" -eq 4 ]; then echo "FAIL: ffmpeg startup gate not passed"; exit 1; fi
+          if grep -q "could not be found" /tmp/cli-out.txt; then echo "FAIL: ffmpeg reported missing"; exit 1; fi
+          echo "OK: ffmpeg gate passed (auth failure expected without credentials)"
