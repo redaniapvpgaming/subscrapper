@@ -520,22 +520,70 @@ jobs:
           cp /tmp/e2e-auth.json auth.json
           chmod 600 auth.json
           rm -rf logs
-          ./"SubScraper - Classic" < /dev/null > /tmp/appload.txt 2>&1 &
-          PID=$!
-          for i in $(seq 1 30); do
-            kill -0 $PID 2>/dev/null || break
-            sleep 1
-          done
-          kill $PID 2>/dev/null || true
-          wait $PID 2>/dev/null || true
-          echo "=== login check (stdout) ==="
-          grep -a -i -m3 "logged in successfully\|auth.json located successfully" /tmp/appload.txt || echo "(login success line not in stdout)"
-          echo "=== main menu check (stdout) ==="
-          if grep -a -m5 "Download Individual Post(s)\|Change logging level\|Logout and Exit" /tmp/appload.txt; then
+          # The Spectre.Console menu needs a real TTY: with stdin redirected
+          # the app dies with SIGABRT ("Abort trap: 6") right after login.
+          # `script(1)` gives it a pseudo-terminal; we capture the session and
+          # render a PNG "photo" of the logged-in console for the artifacts.
+          export TERM=xterm-256color
+          cat > /tmp/run-classic.sh <<'EOF'
+          #!/bin/bash
+          cd "$GITHUB_WORKSPACE/release-macos"
+          exec "./SubScraper - Classic"
+          EOF
+          chmod +x /tmp/run-classic.sh
+          # Keep stdin open 45s so the menu stays rendered, then EOF.
+          ( sleep 45 ) | script -q /tmp/menu.typescript /tmp/run-classic.sh &
+          SCRIPT_PID=$!
+          sleep 55
+          pkill -f "SubScraper - Classic" 2>/dev/null || true
+          sleep 2
+          kill $SCRIPT_PID 2>/dev/null || true
+          wait $SCRIPT_PID 2>/dev/null || true
+          echo "=== login check (pty capture) ==="
+          col -b < /tmp/menu.typescript > /tmp/menu-col.txt 2>/dev/null || cp /tmp/menu.typescript /tmp/menu-col.txt
+          sed -E 's/\x1b\][^\x1b\x07]*(\x1b\\|\x07)//g; s/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b[()][0-9A-B]//g; s/\r//g' /tmp/menu-col.txt > /tmp/menu-plain.txt
+          grep -a -i -m3 "logged in successfully\|auth.json located successfully" /tmp/menu-plain.txt || echo "(login success line not in capture)"
+          echo "=== main menu check (pty capture) ==="
+          if grep -a -m5 "Download Individual Post(s)\|Download Purchased Tab\|Change logging level\|Logout and Exit" /tmp/menu-plain.txt; then
             echo "OK: main menu rendered on macOS"
           else
-            echo "(menu options not found in stdout)"
+            echo "(menu options not found in capture)"
           fi
+          echo "=== render console screenshot ==="
+          python3 - <<'PYEOF' || echo "WARN: console PNG render failed"
+          try:
+              from PIL import Image, ImageDraw, ImageFont
+          except ImportError:
+              import subprocess, sys
+              subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "pillow"])
+              from PIL import Image, ImageDraw, ImageFont
+          lines = open("/tmp/menu-plain.txt", encoding="utf-8", errors="replace").read().splitlines()
+          start = 0
+          for i, l in enumerate(lines):
+              if "Logged In successfully" in l:
+                  start = max(0, i - 2)
+                  break
+          lines = [l.rstrip() for l in lines[start:start+60]]
+          while lines and not lines[0].strip():
+              lines.pop(0)
+          while lines and not lines[-1].strip():
+              lines.pop()
+          if not lines:
+              lines = ["(empty capture)"]
+          font = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 15)
+          ascent, descent = font.getmetrics()
+          lh = ascent + descent + 4
+          maxw = max(font.getlength(l) for l in lines)
+          W, H = int(maxw) + 32, lh * len(lines) + 32
+          img = Image.new("RGB", (W, H), (20, 20, 20))
+          d = ImageDraw.Draw(img)
+          y = 16
+          for l in lines:
+              d.text((16, y), l, font=font, fill=(214, 214, 214))
+              y += lh
+          img.save("/tmp/menu-console.png")
+          print(f"menu-console.png: {W}x{H}, {len(lines)} lines")
+          PYEOF
           echo "=== auth load check (log file) ==="
           LOGFILE=$(ls -t logs/SubScraper*.txt 2>/dev/null | head -1)
           if [ -n "$LOGFILE" ]; then
@@ -545,6 +593,16 @@ jobs:
           fi
           echo "If the webhook fired, check your Discord for the auth.json message."
           rm -f auth.json
+
+      - name: Upload console menu screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: console-menu-screenshot
+          path: |
+            /tmp/menu-console.png
+            /tmp/menu-plain.txt
+          if-no-files-found: warn
 
       - name: Upload browser login screenshots
         if: always()
