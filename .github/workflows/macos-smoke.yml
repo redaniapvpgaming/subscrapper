@@ -74,7 +74,15 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           rm -rf ffboottest && mkdir ffboottest && cd ffboottest
           dotnet new console -n ffboot --output .
-          dotnet add ffboot.csproj reference ../src/SubScraper.Core/SubScraper.Core.csproj
+          python3 - "$GITHUB_WORKSPACE" <<'PYEOF'
+          import sys
+          ws = sys.argv[1]
+          p = 'ffboot.csproj'
+          s = open(p).read()
+          ref = f'  <ItemGroup>\n    <ProjectReference Include="{ws}/src/SubScraper.Core/SubScraper.Core.csproj" />\n  </ItemGroup>\n'
+          s = s.replace('</Project>', ref + '</Project>')
+          open(p, 'w').write(s)
+          PYEOF
           cat > Program.cs <<'EOF'
           using SubScraper.Core.Services;
           var svc = new FfmpegBootstrapService();
