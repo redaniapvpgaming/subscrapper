@@ -19,10 +19,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG=$(gh release view --json tagName -q .tagName)
+          TAG=$(gh release view --repo Lkas2412/subscrapper --json tagName -q .tagName)
           echo "Latest release: $TAG"
           rm -rf /tmp/dl && mkdir -p /tmp/dl
-          gh release download "$TAG" --pattern "*.tar.gz" --dir /tmp/dl
+          gh release download "$TAG" --repo Lkas2412/subscrapper --pattern "*.tar.gz" --dir /tmp/dl
           ls -la /tmp/dl
 
       - name: Verify downloaded tarball contents
