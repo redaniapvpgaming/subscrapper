@@ -175,6 +175,7 @@ jobs:
             Name = "OnlyFans"
             BaseUrl = "https://onlyfans.com"
             ApiPath = "/api2/v2"
+            DrmCdnHost = "cdn2.onlyfans.com"
           }
           EOF
           export PATH="$(cat /tmp/ffbin-dir.txt):$PATH"
