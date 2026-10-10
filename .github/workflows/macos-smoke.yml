@@ -398,6 +398,7 @@ jobs:
                       await pwField.PressAsync("Enter");
                       // Wait up to 3 min for the session cookies (captcha/2FA -> timeout).
                       IReadOnlyList<BrowserContextCookiesResult>? found = null;
+                      int captchaAttempts = 0;
                       var deadline = DateTime.UtcNow.AddMinutes(3);
                       while (DateTime.UtcNow < deadline)
                       {
@@ -405,6 +406,50 @@ jobs:
                           bool hasAuthId = cookies.Any(c => c.Name == "auth_id" && c.Domain.Contains("onlyfans") && !string.IsNullOrEmpty(c.Value));
                           bool hasSess = cookies.Any(c => c.Name == "sess" && c.Domain.Contains("onlyfans") && !string.IsNullOrEmpty(c.Value));
                           if (hasAuthId && hasSess) { found = cookies; break; }
+                          // If a Cloudflare Turnstile challenge shows up, try up to 3 human-like
+                          // clicks on the checkbox (LEFT edge of the widget, where the box sits),
+                          // verifying the issued token after each. Then keep waiting for cookies.
+                          if (captchaAttempts < 3)
+                          {
+                              // Re-query every attempt: the widget iframe re-renders.
+                              IFrame? challenge = null;
+                              var widgetHandle = await page.QuerySelectorAsync("iframe[title=\"Widget containing a Cloudflare security challenge\"]");
+                              if (widgetHandle != null) challenge = await widgetHandle.ContentFrameAsync();
+                              challenge ??= page.Frames.FirstOrDefault(f =>
+                                  f.Url.Contains("challenges.cloudflare.com", StringComparison.OrdinalIgnoreCase) ||
+                                  f.Url.Contains("captcha", StringComparison.OrdinalIgnoreCase));
+                              if (challenge != null)
+                              {
+                                  captchaAttempts++;
+                                  Console.WriteLine($"Turnstile challenge detected, click attempt {captchaAttempts}/3...");
+                                  try
+                                  {
+                                      var frameEl = await challenge.FrameElementAsync();
+                                      await frameEl.ScrollIntoViewIfNeededAsync();
+                                      var box = await frameEl.BoundingBoxAsync();
+                                      if (box != null)
+                                      {
+                                          float cx = box.X + 28, cy = box.Y + box.Height / 2;
+                                          await page.Mouse.MoveAsync(cx, cy, new() { Steps = 25 });
+                                          await Task.Delay(400);
+                                          await page.Mouse.DownAsync();
+                                          await Task.Delay(120);
+                                          await page.Mouse.UpAsync();
+                                          bool cleared = false;
+                                          for (int i = 0; i < 15 && !cleared; i++)
+                                          {
+                                              await Task.Delay(1000);
+                                              cleared = await challenge.EvaluateAsync<bool>(
+                                                  "() => { const el = document.querySelector('input[name=\"cf-turnstile-response\"]'); return !!el && el.value.length > 0; }");
+                                          }
+                                          Console.WriteLine(cleared ? "Challenge cleared (token issued)." : "Challenge not cleared.");
+                                          if (cleared) { await Task.Delay(5000); continue; }
+                                      }
+                                  }
+                                  catch (Exception ex) { Console.WriteLine($"Challenge click failed: {ex.GetType().Name}: {ex.Message}"); }
+                                  continue;
+                              }
+                          }
                           await Task.Delay(2000);
                       }
                       await page.ScreenshotAsync(new PageScreenshotOptions { Path = "/tmp/browser-login-e2e.png" });
