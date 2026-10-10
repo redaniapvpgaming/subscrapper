@@ -204,6 +204,43 @@ jobs:
               }
           }
           EOF
+          cat > src/SubScraper.Tests/Services/RealMacOSBrowserTypingTests.cs <<'EOF'
+          using Microsoft.Playwright;
+          namespace SubScraper.Tests.Services;
+          public class RealMacOSBrowserTypingTests
+          {
+              // Headful typing proof: same launch path as the app's browser login
+              // (LaunchPersistentContextAsync + Headless=false + Channel="chromium").
+              // Passes only if Chromium really opens and accepts input.
+              [Fact]
+              public async Task HeadfulChromium_OpensVisibleWindowAndAcceptsTyping()
+              {
+                  string userDataDir = Path.Combine(Path.GetTempPath(), "pw-typing-" + Guid.NewGuid().ToString("N"));
+                  try
+                  {
+                      using IPlaywright playwright = await Playwright.CreateAsync();
+                      await using IBrowserContext context = await playwright.Chromium.LaunchPersistentContextAsync(
+                          userDataDir,
+                          new BrowserTypeLaunchPersistentContextOptions
+                          {
+                              Headless = false,
+                              Channel = "chromium",
+                          });
+                      IPage page = await context.NewPageAsync();
+                      await page.GotoAsync("data:text/html,<html><body style='margin:40px'><h1>SubScraper macOS</h1><input id='q' style='font-size:32px;width:500px'></body></html>");
+                      await page.FillAsync("#q", "typing works OK");
+                      string value = await page.InputValueAsync("#q");
+                      Assert.Equal("typing works OK", value);
+                      await page.ScreenshotAsync(new PageScreenshotOptions { Path = "/tmp/browser-login-typing.png" });
+                  }
+                  finally
+                  {
+                      if (Directory.Exists(userDataDir))
+                          Directory.Delete(userDataDir, recursive: true);
+                  }
+              }
+          }
+          EOF
           cd src
           dotnet test SubScraper.Tests/SubScraper.Tests.csproj --filter "FullyQualifiedName~RealMacOSBrowser" -v minimal
 
