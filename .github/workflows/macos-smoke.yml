@@ -350,6 +350,41 @@ jobs:
           fi
           echo "OK: tarball contents fully verified"
 
+      - name: Test the extracted tarball (what users download)
+        run: |
+          rm -rf /tmp/final-test && mkdir -p /tmp/final-test
+          tar -xzf "$GITHUB_WORKSPACE/SubScraperV1.0.13-osx-arm64.tar.gz" -C /tmp/final-test
+          echo "=== extracted layout ==="
+          ls /tmp/final-test/
+          # Exec permissions must survive the tar round-trip (no chmod fixups here)
+          test -x "/tmp/final-test/SubScraper - Classic" || { echo "FAIL: Classic exec permission lost in tarball"; exit 1; }
+          test -x /tmp/final-test/ffmpeg/bin/ffmpeg || { echo "FAIL: ffmpeg exec permission lost in tarball"; exit 1; }
+          test -x /tmp/final-test/ffmpeg/bin/ffprobe || { echo "FAIL: ffprobe exec permission lost in tarball"; exit 1; }
+          test -x /tmp/final-test/SubScraper.app/Contents/MacOS/SubScraper || { echo "FAIL: GUI exec permission lost in tarball"; exit 1; }
+          echo "OK: exec permissions preserved through tarball"
+          # .app bundle intact in the shipped artifact
+          APP="/tmp/final-test/SubScraper.app"
+          test -f "$APP/Contents/MacOS/config.conf" || { echo "FAIL: GUI config missing in tarball"; exit 1; }
+          test -f "$APP/Contents/MacOS/cdm/devices/chrome_1610/device_client_id_blob" || { echo "FAIL: GUI CDM blob missing in tarball"; exit 1; }
+          test -f "$APP/Contents/MacOS/ffmpeg/bin/ffmpeg" || { echo "FAIL: GUI ffmpeg missing in tarball"; exit 1; }
+          echo "OK: .app bundle intact in shipped tarball"
+          # Run the SHIPPED Classic with restricted PATH (simulates a clean user Mac)
+          cd /tmp/final-test
+          export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+          command -v ffmpeg >/dev/null 2>&1 && { echo "FAIL: ffmpeg still visible on PATH"; exit 1; }
+          set +e
+          ./"SubScraper - Classic" --non-interactive > /tmp/final-shipped-test.txt 2>&1
+          CODE=$?
+          set -e
+          cat /tmp/final-shipped-test.txt
+          echo "exit=$CODE"
+          if [ "$CODE" -eq 4 ]; then echo "FAIL: ffmpeg startup gate not passed on shipped tarball"; exit 1; fi
+          grep -q "ffmpeg/bin/ffmpeg" /tmp/final-shipped-test.txt || { echo "FAIL: bundled ffmpeg path not used"; exit 1; }
+          grep -q "9\.0\." /tmp/final-shipped-test.txt || { echo "FAIL: expected bundled 9.x version"; exit 1; }
+          if grep -q "/opt/homebrew" /tmp/final-shipped-test.txt; then echo "FAIL: Homebrew ffmpeg leaked in"; exit 1; fi
+          grep -q 'Name = "OnlyFans"' /tmp/final-test/config.conf || { echo "FAIL: shipped config missing OnlyFans"; exit 1; }
+          echo "OK: shipped tarball works standalone with bundled ffmpeg"
+
       - name: Create GitHub Release (direct .tar.gz download)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
