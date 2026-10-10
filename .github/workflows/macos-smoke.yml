@@ -576,10 +576,13 @@ jobs:
           env -u GITHUB_ACTIONS -u CI "./SubScraper - Classic"
           EOF
           chmod +x /tmp/terminal-classic.sh
-          osascript -e 'tell application "Terminal" to do script "/tmp/terminal-classic.sh"' \
-            && echo "OK: Terminal.app launched" \
+          # Launch Terminal.app first: a cold start can exceed the AppleEvent
+          # timeout, so open the script directly (Terminal runs .sh files)
+          # instead of driving a not-yet-running app via AppleScript.
+          open -a Terminal /tmp/terminal-classic.sh \
+            && echo "OK: Terminal.app launched with Classic" \
             || echo "WARN: Terminal launch failed"
-          sleep 5
+          sleep 8
           osascript -e 'tell application "Terminal" to set bounds of front window to {100, 80, 1120, 820}' 2>/dev/null || true
           osascript -e 'tell application "Terminal" to activate' 2>/dev/null || true
           echo "Waiting for login + menu in Terminal.app..."
