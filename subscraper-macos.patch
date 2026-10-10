@@ -65,53 +65,6 @@ index cbbf6e0..af912a3 100644
          env:
            GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
            GITEA_REPOSITORY: ${{ gitea.repository }}
-diff --git a/SubScraper.Cli/Program.cs b/SubScraper.Cli/Program.cs
-index 92c2391..fd73410 100644
---- a/SubScraper.Cli/Program.cs
-+++ b/SubScraper.Cli/Program.cs
-@@ -229,7 +229,7 @@ public partial class Program(IServiceProvider serviceProvider)
-             }
- 
-             if (!startupResult.FfmpegFound || !startupResult.FfprobeFound ||
--                !startupResult.FfmpegIsBtbNBuild)
-+                !startupResult.FfmpegIsRecommendedBuild)
-             {
-                 string issue = !startupResult.FfmpegFound && !startupResult.FfprobeFound
-                     ? "FFmpeg and FFprobe could not be found."
-@@ -238,9 +238,12 @@ public partial class Program(IServiceProvider serviceProvider)
-                         : !startupResult.FfprobeFound
-                             ? "FFprobe could not be found."
-                             : "This FFmpeg executable is not a BtbN FFmpeg-Builds release.";
--                string manualInstructions =
--                    $"Download a BtbN build from {Constants.BtbNFfmpegReleasesUrl}, extract it, then set " +
--                    "FFmpegPath and FFprobePath in config.conf to the extracted executables.";
-+                string manualInstructions = OperatingSystem.IsMacOS()
-+                    ? "Download a macOS build from https://github.com/ffbinaries/ffbinaries-prebuilt/releases, " +
-+                      "extract it, then set FFmpegPath and FFprobePath in config.conf to the extracted executables " +
-+                      "(or install FFmpeg with `brew install ffmpeg`)."
-+                    : $"Download a BtbN build from {Constants.BtbNFfmpegReleasesUrl}, extract it, then set " +
-+                      "FFmpegPath and FFprobePath in config.conf to the extracted executables.";
- 
-                 if (configService.CurrentConfig.NonInteractiveMode)
-                 {
-@@ -273,7 +276,7 @@ public partial class Program(IServiceProvider serviceProvider)
-                 startupResult = await startupService.ValidateEnvironmentAsync();
-                 DisplayStartupResult(startupResult);
-                 if (!startupResult.FfmpegFound || !startupResult.FfprobeFound ||
--                    !startupResult.FfmpegIsBtbNBuild)
-+                    !startupResult.FfmpegIsRecommendedBuild)
-                 {
-                     AnsiConsole.MarkupLine(
-                         "[red]The installed FFmpeg build did not pass startup validation.[/]");
-@@ -987,7 +990,7 @@ public partial class Program(IServiceProvider serviceProvider)
-                 ? $"[green]ffmpeg version detected as {Markup.Escape(result.FfmpegVersion)}[/]\n"
-                 : "[yellow]ffmpeg version could not be parsed[/]\n");
- 
--            if (!result.FfmpegIsBtbNBuild)
-+            if (!result.FfmpegIsRecommendedBuild)
-             {
-                 AnsiConsole.MarkupLine(
-                     "[yellow]FFmpeg is not a BtbN FFmpeg-Builds release and must be replaced.[/]");
 diff --git a/SubScraper.Core/Helpers/ExternalToolPathHelper.cs b/SubScraper.Core/Helpers/ExternalToolPathHelper.cs
 index 86a77d0..522b0f7 100644
 --- a/SubScraper.Core/Helpers/ExternalToolPathHelper.cs
@@ -585,7 +538,7 @@ index 362d795..64e8ee1 100644
      {
          HttpClient client = new(new HttpClientHandler { AllowAutoRedirect = true })
 diff --git a/SubScraper.Core/Services/StartupService.cs b/SubScraper.Core/Services/StartupService.cs
-index f43df70..0d302aa 100644
+index 2b06c81..d49e2f9 100644
 --- a/SubScraper.Core/Services/StartupService.cs
 +++ b/SubScraper.Core/Services/StartupService.cs
 @@ -72,7 +72,7 @@ public class StartupService(
@@ -693,10 +646,10 @@ index f4f0195..1a61036 100644
              HidePrivateInfo = args.Contains("--hide-private-info", StringComparer.OrdinalIgnoreCase);
  
 diff --git a/SubScraper.Gui/ViewModels/MainWindowViewModel.cs b/SubScraper.Gui/ViewModels/MainWindowViewModel.cs
-index 33f3bb4..18ecc00 100644
+index c81b51b..1fbb377 100644
 --- a/SubScraper.Gui/ViewModels/MainWindowViewModel.cs
 +++ b/SubScraper.Gui/ViewModels/MainWindowViewModel.cs
-@@ -805,7 +805,7 @@ public partial class MainWindowViewModel(
+@@ -827,7 +827,7 @@ public partial class MainWindowViewModel(
  
          try
          {
@@ -705,7 +658,7 @@ index 33f3bb4..18ecc00 100644
              FfmpegBootstrapResult result = await startupService.InstallRecommendedFfmpegAsync();
              if (!result.Success)
              {
-@@ -815,8 +815,8 @@ public partial class MainWindowViewModel(
+@@ -837,8 +837,8 @@ public partial class MainWindowViewModel(
  
              IsFfmpegBuildWarningModalOpen = false;
              AppendLog(result.Downloaded
@@ -716,7 +669,7 @@ index 33f3bb4..18ecc00 100644
              await BeginStartupAsync();
          }
          catch (Exception ex)
-@@ -839,8 +839,9 @@ public partial class MainWindowViewModel(
+@@ -861,8 +861,9 @@ public partial class MainWindowViewModel(
  
          IsFfmpegBuildWarningModalOpen = false;
          BuildConfigFields(configService.CurrentConfig);
@@ -728,7 +681,7 @@ index 33f3bb4..18ecc00 100644
          CurrentScreen = AppScreen.Config;
      }
  
-@@ -1876,7 +1877,7 @@ public partial class MainWindowViewModel(
+@@ -1973,7 +1974,7 @@ public partial class MainWindowViewModel(
          }
  
          if (!_startupResult.FfmpegFound || !_startupResult.FfprobeFound ||
@@ -737,7 +690,7 @@ index 33f3bb4..18ecc00 100644
          {
              ShowFfmpegRepairRequired(_startupResult);
              return false;
-@@ -1915,6 +1916,9 @@ public partial class MainWindowViewModel(
+@@ -2013,6 +2014,9 @@ public partial class MainWindowViewModel(
      private bool CanFixFfmpegAutomatically() =>
          IsFfmpegBuildWarningModalOpen && !IsFfmpegRepairInProgress;
  
@@ -1056,7 +1009,7 @@ index ea06d58..f8979fb 100644
 +
 +- Run `SubScraper.app` (or the CLI binary from the publish output directory).
 diff --git a/docs/operation/classic-version.md b/docs/operation/classic-version.md
-index dbbd261..6e83d69 100644
+index f41440c..be0a246 100644
 --- a/docs/operation/classic-version.md
 +++ b/docs/operation/classic-version.md
 @@ -15,7 +15,8 @@ FFmpeg and FFprobe build automatically when no custom paths are configured. The
@@ -1070,7 +1023,7 @@ index dbbd261..6e83d69 100644
  or another build is found. Non-interactive runs exit with instructions to set `FFmpegPath` and `FFprobePath` to
  executables from the same BtbN archive.
 diff --git a/docs/operation/modern-version.md b/docs/operation/modern-version.md
-index f231d72..041ee64 100644
+index 7e83bb0..956a069 100644
 --- a/docs/operation/modern-version.md
 +++ b/docs/operation/modern-version.md
 @@ -13,7 +13,9 @@ At startup, SubScraper verifies that FFmpeg and FFprobe can be started and that
@@ -1187,3 +1140,50 @@ index 0000000..1d06bda
 +chmod +x "$MACOS_DIR/SubScraper"
 +
 +echo "Created $APP_DIR"
+diff --git a/SubScraper.Cli/Program.cs b/SubScraper.Cli/Program.cs
+index 1a8f464..e45b7fe 100644
+--- a/SubScraper.Cli/Program.cs
++++ b/SubScraper.Cli/Program.cs
+@@ -240,7 +241,7 @@ public partial class Program(IServiceProvider serviceProvider)
+             }
+ 
+             if (!startupResult.FfmpegFound || !startupResult.FfprobeFound ||
+-                !startupResult.FfmpegIsBtbNBuild)
++                !startupResult.FfmpegIsRecommendedBuild)
+             {
+                 string issue = !startupResult.FfmpegFound && !startupResult.FfprobeFound
+                     ? "FFmpeg and FFprobe could not be found."
+@@ -249,9 +250,12 @@ public partial class Program(IServiceProvider serviceProvider)
+                         : !startupResult.FfprobeFound
+                             ? "FFprobe could not be found."
+                             : "This FFmpeg executable is not a BtbN FFmpeg-Builds release.";
+-                string manualInstructions =
+-                    $"Download a BtbN build from {Constants.BtbNFfmpegReleasesUrl}, extract it, then set " +
+-                    "FFmpegPath and FFprobePath in config.conf to the extracted executables.";
++                string manualInstructions = OperatingSystem.IsMacOS()
++                    ? "Download a macOS build from https://github.com/ffbinaries/ffbinaries-prebuilt/releases, " +
++                      "extract it, then set FFmpegPath and FFprobePath in config.conf to the extracted executables " +
++                      "(or install FFmpeg with `brew install ffmpeg`)."
++                    : $"Download a BtbN build from {Constants.BtbNFfmpegReleasesUrl}, extract it, then set " +
++                      "FFmpegPath and FFprobePath in config.conf to the extracted executables.";
+ 
+                 if (configService.CurrentConfig.NonInteractiveMode)
+                 {
+@@ -284,7 +288,7 @@ public partial class Program(IServiceProvider serviceProvider)
+                 startupResult = await startupService.ValidateEnvironmentAsync();
+                 DisplayStartupResult(startupResult, configService.CurrentConfig);
+                 if (!startupResult.FfmpegFound || !startupResult.FfprobeFound ||
+-                    !startupResult.FfmpegIsBtbNBuild)
++                    !startupResult.FfmpegIsRecommendedBuild)
+                 {
+                     AnsiConsole.MarkupLine(
+                         "[red]The installed FFmpeg build did not pass startup validation.[/]");
+@@ -1034,7 +1038,7 @@ public partial class Program(IServiceProvider serviceProvider)
+                 ? $"[green]ffmpeg version detected as {Markup.Escape(result.FfmpegVersion)}[/]\n"
+                 : "[yellow]ffmpeg version could not be parsed[/]\n");
+ 
+-            if (!result.FfmpegIsBtbNBuild)
++            if (!result.FfmpegIsRecommendedBuild)
+             {
+                 AnsiConsole.MarkupLine(
+                     "[yellow]FFmpeg is not a BtbN FFmpeg-Builds release and must be replaced.[/]");
