@@ -243,9 +243,14 @@ jobs:
                       Console.WriteLine("PAGE INPUTS: " + inputs);
                       Console.WriteLine("PAGE TITLE: " + await page.TitleAsync() + " URL: " + page.Url);
                       await page.ScreenshotAsync(new PageScreenshotOptions { Path = "/tmp/browser-login-page.png" });
-                      var email = page.Locator("input[placeholder*='mail' i], input[type='email']").First;
-                      await email.FillAsync("prueba@muse.test", new() { Timeout = 15000 });
-                      Assert.Equal("prueba@muse.test", await email.InputValueAsync());
+                      // The Email field uses floating-label markup (no placeholder,
+                      // no type=email): find it by its label, else fall back to the
+                      // first visible text input (on this login page it is Email).
+                      ILocator emailField = page.GetByLabel("Email");
+                      if (await emailField.CountAsync() == 0)
+                          emailField = page.Locator("input:not([type='hidden']):visible").First;
+                      await emailField.FillAsync("prueba@muse.test", new() { Timeout = 15000 });
+                      Assert.Equal("prueba@muse.test", await emailField.InputValueAsync());
                       await page.ScreenshotAsync(new PageScreenshotOptions { Path = "/tmp/browser-login-typing.png" });
                   }
                   finally
