@@ -71,10 +71,10 @@ jobs:
 
       - name: Test real ffmpeg bootstrap (new macOS code path)
         run: |
-          mkdir -p /tmp/ffboot && cd /tmp/ffboot
-          rm -rf ffboot && dotnet new console -n ffboot --output ffboot
-          cd ffboot
-          dotnet add ffboot.csproj reference "$GITHUB_WORKSPACE/src/SubScraper.Core/SubScraper.Core.csproj"
+          cd "$GITHUB_WORKSPACE"
+          rm -rf ffboottest && mkdir ffboottest && cd ffboottest
+          dotnet new console -n ffboot --output .
+          dotnet add ffboot.csproj reference ../src/SubScraper.Core/SubScraper.Core.csproj
           cat > Program.cs <<'EOF'
           using SubScraper.Core.Services;
           var svc = new FfmpegBootstrapService();
