@@ -107,3 +107,24 @@ jobs:
           grep -q "ffmpeg/bin/ffmpeg" /tmp/rel-command-test.txt || { echo "FAIL: launcher did not use bundled ffmpeg"; exit 1; }
           test ! -f /tmp/config.conf || { echo "FAIL: launcher created stray config.conf in wrong cwd"; exit 1; }
           echo "OK: downloaded release double-click launcher works"
+          # Interactive run via the launcher, like a real Finder double-click:
+          # the browser auth flow must trigger (no display in CI, so we only
+          # check that the flow starts).
+          cd /tmp
+          "/tmp/rel-test/SubScraper - Classic.command" < /dev/null > /tmp/rel-command-interactive-test.txt 2>&1 &
+          REL_LAUNCHER_PID=$!
+          for i in $(seq 1 90); do
+            if ! kill -0 $REL_LAUNCHER_PID 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          kill $REL_LAUNCHER_PID 2>/dev/null || true
+          wait $REL_LAUNCHER_PID 2>/dev/null || true
+          cat /tmp/rel-command-interactive-test.txt
+          if grep -q "Preparing the browser" /tmp/rel-command-interactive-test.txt; then
+            echo "OK: downloaded release launcher triggers browser auth flow (headful launch attempted - no display in CI as expected)"
+          else
+            echo "FAIL: downloaded release launcher did not trigger browser auth flow"
+            exit 1
+          fi
