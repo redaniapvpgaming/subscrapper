@@ -218,6 +218,11 @@ jobs:
                   string userDataDir = Path.Combine(Path.GetTempPath(), "pw-typing-" + Guid.NewGuid().ToString("N"));
                   try
                   {
+                      // Ensure the browser is installed first: xUnit runs test
+                      // classes in parallel, so this test may start before the
+                      // other test's install finishes. Install is idempotent.
+                      int installExitCode = await Task.Run(() => Program.Main(new[] { "install", "chromium" }));
+                      Assert.Equal(0, installExitCode);
                       using IPlaywright playwright = await Playwright.CreateAsync();
                       await using IBrowserContext context = await playwright.Chromium.LaunchPersistentContextAsync(
                           userDataDir,
