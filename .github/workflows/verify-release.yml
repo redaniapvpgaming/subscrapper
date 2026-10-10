@@ -1,0 +1,109 @@
+name: verify published release
+
+# Downloads the ACTUAL published release asset (what users download),
+# lists its tar contents, extracts it and runs it — end-to-end check
+# of the artifact, independent from the build workflow.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  verify-release:
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Download latest published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=$(gh release view --json tagName -q .tagName)
+          echo "Latest release: $TAG"
+          rm -rf /tmp/dl && mkdir -p /tmp/dl
+          gh release download "$TAG" --pattern "*.tar.gz" --dir /tmp/dl
+          ls -la /tmp/dl
+
+      - name: Verify downloaded tarball contents
+        run: |
+          cd /tmp/dl
+          TARBALL=$(ls *.tar.gz | head -1)
+          echo "Testing: $TARBALL"
+          tar -tzf "$TARBALL" | sort > /tmp/tarlist.txt
+          wc -l /tmp/tarlist.txt
+          for f in "./config.conf" \
+                   "./SubScraper.app/Contents/MacOS/config.conf" \
+                   "./cdm/devices/chrome_1610/device_client_id_blob" \
+                   "./cdm/devices/chrome_1610/device_private_key" \
+                   "./SubScraper.app/Contents/MacOS/cdm/devices/chrome_1610/device_client_id_blob" \
+                   "./SubScraper.app/Contents/MacOS/cdm/devices/chrome_1610/device_private_key" \
+                   "./ffmpeg/bin/ffmpeg" \
+                   "./ffmpeg/bin/ffprobe" \
+                   "./SubScraper.app/Contents/MacOS/ffmpeg/bin/ffmpeg" \
+                   "./SubScraper.app/Contents/MacOS/ffmpeg/bin/ffprobe" \
+                   "./SubScraper.app/Contents/MacOS/SubScraper" \
+                   "./SubScraper - Classic" \
+                   "./SubScraper - Classic.command" \
+                   "./rules.json" \
+                   "./chromium-scripts/stealth.min.js"; do
+            grep -qxF "$f" /tmp/tarlist.txt || { echo "FAIL: missing $f"; exit 1; }
+          done
+          echo "OK: all expected files present in downloaded release"
+          tar -xzOf "$TARBALL" ./config.conf | grep -q 'Name = "OnlyFans"' \
+            || { echo "FAIL: config missing OnlyFans site"; exit 1; }
+          echo "OK: downloaded config has OnlyFans site"
+          BLOB_SIZE=$(tar -xzOf "$TARBALL" ./cdm/devices/chrome_1610/device_client_id_blob | wc -c)
+          KEY_SIZE=$(tar -xzOf "$TARBALL" ./cdm/devices/chrome_1610/device_private_key | wc -c)
+          echo "CDM blob bytes: $BLOB_SIZE, key bytes: $KEY_SIZE"
+          [ "$BLOB_SIZE" -gt 1000 ] || { echo "FAIL: blob too small"; exit 1; }
+          [ "$KEY_SIZE" -gt 1000 ] || { echo "FAIL: key too small"; exit 1; }
+          echo "OK: CDM keys present in downloaded release"
+
+      - name: Test the downloaded release (extract and run)
+        run: |
+          cd /tmp/dl
+          TARBALL=$(ls *.tar.gz | head -1)
+          rm -rf /tmp/rel-test && mkdir -p /tmp/rel-test
+          tar -xzf "$TARBALL" -C /tmp/rel-test
+          echo "=== extracted layout ==="
+          ls /tmp/rel-test/
+          test -x "/tmp/rel-test/SubScraper - Classic" || { echo "FAIL: Classic exec permission lost"; exit 1; }
+          test -x /tmp/rel-test/ffmpeg/bin/ffmpeg || { echo "FAIL: ffmpeg exec permission lost"; exit 1; }
+          test -x /tmp/rel-test/ffmpeg/bin/ffprobe || { echo "FAIL: ffprobe exec permission lost"; exit 1; }
+          test -x /tmp/rel-test/SubScraper.app/Contents/MacOS/SubScraper || { echo "FAIL: GUI exec permission lost"; exit 1; }
+          test -x "/tmp/rel-test/SubScraper - Classic.command" || { echo "FAIL: launcher exec permission lost"; exit 1; }
+          echo "OK: exec permissions preserved in downloaded release"
+          APP="/tmp/rel-test/SubScraper.app"
+          test -f "$APP/Contents/MacOS/config.conf" || { echo "FAIL: GUI config missing"; exit 1; }
+          test -f "$APP/Contents/MacOS/cdm/devices/chrome_1610/device_client_id_blob" || { echo "FAIL: GUI CDM blob missing"; exit 1; }
+          test -f "$APP/Contents/MacOS/ffmpeg/bin/ffmpeg" || { echo "FAIL: GUI ffmpeg missing"; exit 1; }
+          test -s /tmp/rel-test/rules.json || { echo "FAIL: rules.json missing or empty"; exit 1; }
+          test -s /tmp/rel-test/chromium-scripts/stealth.min.js || { echo "FAIL: stealth.min.js missing or empty"; exit 1; }
+          echo "OK: downloaded release bundle intact (incl. rules.json and chromium-scripts)"
+          cd /tmp/rel-test
+          export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+          command -v ffmpeg >/dev/null 2>&1 && { echo "FAIL: ffmpeg still visible on PATH"; exit 1; }
+          set +e
+          ./"SubScraper - Classic" --non-interactive > /tmp/rel-shipped-test.txt 2>&1
+          CODE=$?
+          set -e
+          cat /tmp/rel-shipped-test.txt
+          echo "exit=$CODE"
+          if [ "$CODE" -eq 4 ]; then echo "FAIL: ffmpeg startup gate not passed"; exit 1; fi
+          grep -q "ffmpeg/bin/ffmpeg" /tmp/rel-shipped-test.txt || { echo "FAIL: bundled ffmpeg path not used"; exit 1; }
+          grep -q "9\.0\." /tmp/rel-shipped-test.txt || { echo "FAIL: expected bundled 9.x version"; exit 1; }
+          if grep -q "/opt/homebrew" /tmp/rel-shipped-test.txt; then echo "FAIL: Homebrew ffmpeg leaked in"; exit 1; fi
+          echo "OK: downloaded release works standalone with bundled ffmpeg"
+          cd /tmp
+          rm -f /tmp/config.conf
+          set +e
+          "/tmp/rel-test/SubScraper - Classic.command" --non-interactive > /tmp/rel-command-test.txt 2>&1
+          COMMAND_CODE=$?
+          set -e
+          cat /tmp/rel-command-test.txt
+          echo "launcher exit=$COMMAND_CODE"
+          if [ "$COMMAND_CODE" -eq 4 ]; then echo "FAIL: launcher did not pass ffmpeg gate"; exit 1; fi
+          grep -q "ffmpeg/bin/ffmpeg" /tmp/rel-command-test.txt || { echo "FAIL: launcher did not use bundled ffmpeg"; exit 1; }
+          test ! -f /tmp/config.conf || { echo "FAIL: launcher created stray config.conf in wrong cwd"; exit 1; }
+          echo "OK: downloaded release double-click launcher works"
