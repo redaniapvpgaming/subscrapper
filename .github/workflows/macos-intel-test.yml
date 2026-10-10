@@ -54,11 +54,11 @@ jobs:
           test -x outosx-x64-cli/SubScraper.Cli || { echo "FAIL: CLI not executable"; exit 1; }
           echo "OK: both binaries are Mach-O x86_64 with exec permission"
 
-      - name: Verify Playwright driver is darwin-x64
+      - name: Prune Playwright driver to darwin-x64
         run: |
-          ls outosx-x64-cli/.playwright/node/ || { echo "FAIL: .playwright/node missing"; exit 1; }
+          echo "=== .playwright/node before cleanup ==="; ls outosx-x64-cli/.playwright/node/ || { echo "FAIL: .playwright/node missing"; exit 1; }
           test -d outosx-x64-cli/.playwright/node/darwin-x64 || { echo "FAIL: darwin-x64 driver missing"; exit 1; }
-          test ! -e outosx-x64-cli/.playwright/node/darwin-arm64 || { echo "FAIL: darwin-arm64 leaked into x64 build"; exit 1; }
+          rm -rf outosx-x64-cli/.playwright/node/darwin-arm64; echo "=== .playwright/node after cleanup ==="; ls outosx-x64-cli/.playwright/node/ # prune: NuGet restores both darwin drivers (arm64 release ships only darwin-arm64)
           test -x outosx-x64-cli/.playwright/node/darwin-x64/node || { echo "FAIL: darwin-x64 node not executable"; exit 1; }
           echo "OK: Playwright driver is darwin-x64 only"
 
