@@ -31,6 +31,7 @@ jobs:
           cd src
           dotnet publish SubScraper/SubScraper.csproj \
             -c Release -r osx-arm64 --self-contained \
+            -p:PublishSingleFile=true \
             -o ../outosx-arm64-gui
 
       - name: Publish Classic CLI (osx-arm64)
@@ -38,6 +39,7 @@ jobs:
           cd src
           dotnet publish SubScraper.Cli/SubScraper.Cli.csproj \
             -c Release -r osx-arm64 --self-contained \
+            -p:PublishSingleFile=true \
             -o ../outosx-arm64-cli
 
       - name: Verify Mach-O arm64 binaries
