@@ -1187,3 +1187,41 @@ index 1a8f464..e45b7fe 100644
              {
                  AnsiConsole.MarkupLine(
                      "[yellow]FFmpeg is not a BtbN FFmpeg-Builds release and must be replaced.[/]");
+diff --git a/SubScraper.Core/Services/DbService.cs b/SubScraper.Core/Services/DbService.cs
+index abc47f9..5258756 100644
+--- a/SubScraper.Core/Services/DbService.cs
++++ b/SubScraper.Core/Services/DbService.cs
+@@ -1,3 +1,4 @@
++using System.Runtime.InteropServices;
+ using System.Text;
+ using Microsoft.Data.Sqlite;
+ using Serilog;
+@@ -7,6 +8,28 @@ namespace SubScraper.Services;
+ 
+ public class DbService(IConfigService configService) : IDbService
+ {
++    static DbService()
++    {
++        // macOS single-file: the e_sqlite3 native library bundled by
++        // SQLitePCLRaw isn't resolved at runtime, so preload the dylib
++        // shipped next to the app binary. Harmless if it's missing.
++        if (OperatingSystem.IsMacOS())
++        {
++            try
++            {
++                string dylib = Path.Combine(AppContext.BaseDirectory, "libe_sqlite3.dylib");
++                if (File.Exists(dylib))
++                {
++                    NativeLibrary.Load(dylib);
++                }
++            }
++            catch
++            {
++                // Fall through to the default load behavior.
++            }
++        }
++    }
++
+     /// <summary>
+     /// Creates or updates the per-user metadata database.
+     /// </summary>
