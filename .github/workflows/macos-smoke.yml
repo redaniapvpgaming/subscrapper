@@ -53,9 +53,10 @@ jobs:
         run: |
           cd src
           chmod +x scripts/package-macos.sh
-          APP_DIR="$GITHUB_WORKSPACE/release-macos/SubScraper.app" \
-          PUBLISH_DIR="$GITHUB_WORKSPACE/outosx-arm64-gui" \
-          ./scripts/package-macos.sh
+          ./scripts/package-macos.sh \
+            "$GITHUB_WORKSPACE/outosx-arm64-gui" \
+            "1.0.13-test" \
+            "$GITHUB_WORKSPACE/release-macos"
 
       - name: Validate .app bundle
         run: |
