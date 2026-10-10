@@ -652,9 +652,10 @@ jobs:
           sleep 8
           osascript -e 'tell application "Terminal" to set bounds of front window to {100, 80, 1120, 820}' 2>/dev/null || true
           osascript -e 'tell application "Terminal" to activate' 2>/dev/null || true
-          # Let it download ~9 minutes, screenshotting progress
-          for i in 1 2 3; do
-            sleep 180
+          # Let it download ~4 minutes (just to verify downloads work),
+          # screenshotting progress
+          for i in 1 2; do
+            sleep 120
             screencapture -x /tmp/download-progress-$i.png 2>/dev/null \
               && echo "OK: progress screenshot $i saved" \
               || echo "WARN: progress screenshot $i failed"
