@@ -29,7 +29,7 @@ jobs:
       - name: Publish GUI (osx-arm64)
         run: |
           cd src
-          dotnet publish SubScraper/SubScraper.csproj \
+          dotnet publish SubScraper.Gui/SubScraper.Gui.csproj \
             -c Release -r osx-arm64 --self-contained \
             -p:PublishSingleFile=true \
             -o ../outosx-arm64-gui
