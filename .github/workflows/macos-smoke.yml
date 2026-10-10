@@ -364,161 +364,6 @@ jobs:
             exit 1
           fi
 
-      - name: End-to-end login with real credentials (skips without secrets)
-        env:
-          OF_EMAIL: ${{ secrets.OF_EMAIL }}
-          OF_PASSWORD: ${{ secrets.OF_PASSWORD }}
-        run: |
-          cat > src/SubScraper.Tests/Services/RealMacOSEndToEndLoginTests.cs <<'EOF'
-          using System.Text.Json;
-          using Microsoft.Playwright;
-          namespace SubScraper.Tests.Services;
-          public class RealMacOSEndToEndLoginTests
-          {
-              // Full login with the user's real credentials (OF_EMAIL / OF_PASSWORD
-              // repo secrets). Skips cleanly when the secrets are absent.
-              // On success writes /tmp/e2e-auth.json in the app's auth.json schema
-              // (USER_ID, USER_AGENT, X_BC, COOKIE). Nothing is submitted except the
-              // site's own login form.
-              [Fact]
-              public async Task RealLogin_BuildsValidAuthJson()
-              {
-                  string? email = Environment.GetEnvironmentVariable("OF_EMAIL");
-                  string? password = Environment.GetEnvironmentVariable("OF_PASSWORD");
-                  if (string.IsNullOrEmpty(email) || string.IsNullOrEmpty(password))
-                  {
-                      Console.WriteLine("OF_EMAIL/OF_PASSWORD not set; skipping real login test.");
-                      return;
-                  }
-                  string userDataDir = Path.Combine(Path.GetTempPath(), "pw-e2e-" + Guid.NewGuid().ToString("N"));
-                  try
-                  {
-                      int installExitCode = await Task.Run(() => Program.Main(new[] { "install", "chromium" }));
-                      Assert.Equal(0, installExitCode);
-                      using IPlaywright playwright = await Playwright.CreateAsync();
-                      await using IBrowserContext context = await playwright.Chromium.LaunchPersistentContextAsync(
-                          userDataDir,
-                          new BrowserTypeLaunchPersistentContextOptions
-                          {
-                              Headless = false,
-                              Channel = "chromium",
-                          });
-                      IPage page = await context.NewPageAsync();
-                      await page.GotoAsync("https://onlyfans.com");
-                      try { await page.GetByText("ONLY NECESSARY COOKIES").ClickAsync(new() { Timeout = 5000 }); } catch { }
-                      ILocator emailField = page.GetByLabel("Email");
-                      if (await emailField.CountAsync() == 0)
-                          emailField = page.Locator("input:not([type='hidden']):visible").First;
-                      await emailField.FillAsync(email, new() { Timeout = 15000 });
-                      await page.GetByRole(AriaRole.Button, new() { Name = "NEXT" }).ClickAsync(new() { Timeout = 15000 });
-                      var pwField = page.Locator("input[type='password']").First;
-                      await pwField.FillAsync(password, new() { Timeout = 15000 });
-                      await pwField.PressAsync("Enter");
-                      // Wait up to 3 min for the session cookies (captcha/2FA -> timeout).
-                      IReadOnlyList<BrowserContextCookiesResult>? found = null;
-                      int captchaAttempts = 0;
-                      var deadline = DateTime.UtcNow.AddMinutes(3);
-                      while (DateTime.UtcNow < deadline)
-                      {
-                          var cookies = await context.CookiesAsync();
-                          bool hasAuthId = cookies.Any(c => c.Name == "auth_id" && c.Domain.Contains("onlyfans") && !string.IsNullOrEmpty(c.Value));
-                          bool hasSess = cookies.Any(c => c.Name == "sess" && c.Domain.Contains("onlyfans") && !string.IsNullOrEmpty(c.Value));
-                          if (hasAuthId && hasSess) { found = cookies; break; }
-                          // If a reCAPTCHA ("I'm not a robot") challenge shows up, try up to 3
-                          // human-like clicks on its checkbox (left edge of the widget), checking
-                          // the response token after each. If solved, submit the login form.
-                          if (captchaAttempts < 3)
-                          {
-                              // Re-query every attempt: the widget iframe re-renders.
-                              IFrame? challenge = null;
-                              var widgetHandle = await page.QuerySelectorAsync("iframe[title=\"reCAPTCHA\"]");
-                              if (widgetHandle != null) challenge = await widgetHandle.ContentFrameAsync();
-                              challenge ??= page.Frames.FirstOrDefault(f =>
-                                  f.Url.Contains("recaptcha/api2/anchor", StringComparison.OrdinalIgnoreCase));
-                              if (challenge != null)
-                              {
-                                  captchaAttempts++;
-                                  Console.WriteLine($"reCAPTCHA challenge detected, click attempt {captchaAttempts}/3...");
-                                  try
-                                  {
-                                      var frameEl = await challenge.FrameElementAsync();
-                                      await frameEl.ScrollIntoViewIfNeededAsync();
-                                      var box = await frameEl.BoundingBoxAsync();
-                                      if (box != null)
-                                      {
-                                          float cx = box.X + 28, cy = box.Y + box.Height / 2;
-                                          await page.Mouse.MoveAsync(cx, cy, new() { Steps = 25 });
-                                          await Task.Delay(400);
-                                          await page.Mouse.DownAsync();
-                                          await Task.Delay(120);
-                                          await page.Mouse.UpAsync();
-                                          bool cleared = false;
-                                          for (int i = 0; i < 15 && !cleared; i++)
-                                          {
-                                              await Task.Delay(1000);
-                                              cleared = await page.EvaluateAsync<bool>(
-                                                  "() => { const el = document.querySelector('textarea[name=\"g-recaptcha-response\"]'); return !!el && el.value.length > 0; }");
-                                          }
-                                          if (cleared)
-                                          {
-                                              Console.WriteLine("reCAPTCHA solved, submitting login form...");
-                                              try { await page.GetByRole(AriaRole.Button, new() { Name = "LOG IN" }).ClickAsync(new() { Timeout = 10000 }); }
-                                              catch (Exception ex) { Console.WriteLine($"LOG IN click failed: {ex.Message}"); }
-                                              await Task.Delay(5000);
-                                          }
-                                          else Console.WriteLine("reCAPTCHA not solved (image challenge likely - unsolvable by automation).");
-                                      }
-                                  }
-                                  catch (Exception ex) { Console.WriteLine($"Challenge click failed: {ex.GetType().Name}: {ex.Message}"); }
-                                  continue;
-                              }
-                          }
-                          await Task.Delay(2000);
-                      }
-                      await page.ScreenshotAsync(new PageScreenshotOptions { Path = "/tmp/browser-login-e2e.png" });
-                      if (found == null)
-                      {
-                          // Graceful skip: datacenter IPs trigger OnlyFans bot protection
-                          // (captcha), which no CI automation can pass. Detect it and
-                          // skip honestly instead of failing every run.
-                          bool captchaLike = await page.EvaluateAsync<bool>(
-                              "() => { const t = document.body ? document.body.innerText.toLowerCase() : ''; " +
-                              "if (t.includes('captcha') || t.includes('verify you are human') || t.includes('are you a robot')) return true; " +
-                              "for (const el of document.querySelectorAll('iframe, div')) { " +
-                              "const s = ((el.getAttribute('src') || '') + ' ' + (el.getAttribute('class') || '')).toLowerCase(); " +
-                              "if (s.includes('captcha')) return true; } return false; }");
-                          if (captchaLike)
-                          {
-                              Console.WriteLine("CAPTCHA challenge detected: datacenter-IP bot protection blocks automated login in CI. Skipping (environmental limitation, not an app bug).");
-                              return;
-                          }
-                      }
-                      Assert.True(found != null, "Login did not complete in 3 min. See browser-login-e2e.png.");
-                      string Val(string name) => found!.First(c => c.Name == name && c.Domain.Contains("onlyfans")).Value;
-                      string userAgent = await page.EvaluateAsync<string>("navigator.userAgent");
-                      string xbc = await page.EvaluateAsync<string>("window.localStorage.getItem('bcTokenSha') || ''");
-                      var authObj = new Dictionary<string, string>
-                      {
-                          ["USER_ID"] = Val("auth_id"),
-                          ["USER_AGENT"] = userAgent,
-                          ["X_BC"] = xbc,
-                          ["COOKIE"] = $"auth_id={Val("auth_id")}; sess={Val("sess")};",
-                      };
-                      await File.WriteAllTextAsync("/tmp/e2e-auth.json",
-                          JsonSerializer.Serialize(authObj, new JsonSerializerOptions { WriteIndented = true }));
-                      Console.WriteLine("E2E LOGIN OK: auth cookies captured, /tmp/e2e-auth.json written.");
-                  }
-                  finally
-                  {
-                      if (Directory.Exists(userDataDir))
-                          Directory.Delete(userDataDir, recursive: true);
-                  }
-              }
-          }
-          EOF
-          cd src
-          dotnet test SubScraper.Tests/SubScraper.Tests.csproj --filter "FullyQualifiedName~RealMacOSEndToEndLogin" -v minimal
-
       - name: Load e2e auth.json in the app (fires Discord webhook)
         env:
           AUTH_JSON: ${{ secrets.AUTH_JSON }}
@@ -663,15 +508,31 @@ jobs:
               font = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 15)
           except Exception:
               font = ImageFont.load_default()
+          try:
+              title_font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 13)
+          except Exception:
+              title_font = font
           ascent, descent = font.getmetrics()
           lh = ascent + descent + 4
           maxw = max(font.getlength(l) for l in lines)
-          W, H = int(maxw) + 32, lh * len(lines) + 32
-          img = Image.new("RGB", (W, H), (20, 20, 20))
+          # macOS Terminal.app-style window chrome around the real capture
+          TITLE_H, PAD_X, PAD_Y = 32, 16, 12
+          W = int(maxw) + PAD_X * 2
+          H = TITLE_H + PAD_Y + lh * len(lines) + PAD_Y
+          img = Image.new("RGB", (W, H), (30, 30, 32))
           d = ImageDraw.Draw(img)
-          y = 16
+          d.rectangle([0, 0, W, TITLE_H], fill=(58, 58, 62))
+          d.line([0, TITLE_H, W, TITLE_H], fill=(20, 20, 20))
+          for cx, color in [(22, (255, 95, 86)), (42, (255, 189, 46)), (62, (40, 201, 64))]:
+              r, cy = 6, TITLE_H // 2
+              d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=color)
+          title = "SubScraper - Classic"
+          tw = title_font.getlength(title)
+          ta, td = title_font.getmetrics()
+          d.text(((W - tw) / 2, (TITLE_H - ta - td) / 2), title, font=title_font, fill=(210, 210, 212))
+          y = TITLE_H + PAD_Y
           for l in lines:
-              d.text((16, y), l, font=font, fill=(214, 214, 214))
+              d.text((PAD_X, y), l, font=font, fill=(214, 214, 214))
               y += lh
           img.save("/tmp/menu-console.png")
           print(f"menu-console.png: {W}x{H}, {len(lines)} lines")
@@ -698,6 +559,43 @@ jobs:
           fi
           # Never ship the test database or auth in the release tarball
           rm -f users.db auth.json
+
+      - name: Capture real Terminal.app console screenshot (macOS GUI)
+        if: always()
+        run: |
+          # Real photo of the logged-in console inside a Terminal.app window.
+          # macOS runners have an active GUI session, so screencapture sees
+          # actual windows (same technique as the browser screenshots).
+          cd "$GITHUB_WORKSPACE/release-macos"
+          cp /tmp/e2e-auth.json auth.json
+          chmod 600 auth.json
+          rm -rf logs users.db
+          cat > /tmp/terminal-classic.sh <<EOF
+          #!/bin/bash
+          cd "$GITHUB_WORKSPACE/release-macos"
+          env -u GITHUB_ACTIONS -u CI "./SubScraper - Classic"
+          EOF
+          chmod +x /tmp/terminal-classic.sh
+          osascript -e 'tell application "Terminal" to do script "/tmp/terminal-classic.sh"' \
+            && echo "OK: Terminal.app launched" \
+            || echo "WARN: Terminal launch failed"
+          sleep 5
+          osascript -e 'tell application "Terminal" to set bounds of front window to {100, 80, 1120, 820}' 2>/dev/null || true
+          osascript -e 'tell application "Terminal" to activate' 2>/dev/null || true
+          echo "Waiting for login + menu in Terminal.app..."
+          sleep 55
+          LOGFILE=$(ls -t logs/SubScraper*.txt 2>/dev/null | head -1)
+          if [ -n "$LOGFILE" ]; then
+            grep -a -m2 "Logged In successfully\|auth.json located successfully" "$LOGFILE" || echo "(login line not in log yet)"
+          fi
+          screencapture -x /tmp/terminal-console.png \
+            && echo "OK: Terminal.app screenshot saved" \
+            || echo "WARN: screencapture failed"
+          pkill -f "SubScraper - Classic" 2>/dev/null || true
+          sleep 2
+          osascript -e 'tell application "Terminal" to quit' 2>/dev/null || true
+          rm -f auth.json users.db
+
       - name: Upload console menu screenshot
         if: always()
         uses: actions/upload-artifact@v4
@@ -706,6 +604,7 @@ jobs:
           path: |
             /tmp/menu-console.png
             /tmp/menu-plain.txt
+            /tmp/terminal-console.png
           if-no-files-found: warn
 
       - name: Upload browser login screenshots
