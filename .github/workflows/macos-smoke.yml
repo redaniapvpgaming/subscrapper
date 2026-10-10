@@ -44,10 +44,10 @@ jobs:
 
       - name: Verify Mach-O arm64 binaries
         run: |
-          file ../outosx-arm64-gui/SubScraper
-          file ../outosx-arm64-cli/SubScraper.Cli
-          test -x ../outosx-arm64-gui/SubScraper
-          test -x ../outosx-arm64-cli/SubScraper.Cli
+          file outosx-arm64-gui/SubScraper.Gui
+          file outosx-arm64-cli/SubScraper.Cli
+          test -x outosx-arm64-gui/SubScraper.Gui
+          test -x outosx-arm64-cli/SubScraper.Cli
 
       - name: Package SubScraper.app
         run: |
