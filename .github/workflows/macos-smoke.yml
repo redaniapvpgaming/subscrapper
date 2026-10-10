@@ -8,6 +8,8 @@ jobs:
   macos-smoke:
     runs-on: macos-15
     timeout-minutes: 45
+    permissions:
+      contents: write
     steps:
       - name: Check out test repo
         uses: actions/checkout@v4
@@ -21,11 +23,26 @@ jobs:
           git apply --check ../subscraper-macos.patch
           git apply ../subscraper-macos.patch
 
+      - name: Verify macOS patch applied
+        run: |
+          cd src
+          grep -q "ffbinaries" SubScraper.Core/Services/FfmpegBootstrapService.cs
+          grep -q "BundledFfmpegRelativePathMacOS" SubScraper.Core/Helpers/ExternalToolPathHelper.cs
+          grep -q "13.0" scripts/Info.plist
+          echo "OK: macOS patch markers present"
+
       - name: Apply Discord webhook patch
         run: |
           cd src
           git apply --check ../discord-webhook.patch
           git apply ../discord-webhook.patch
+
+      - name: Verify Discord webhook patch applied
+        run: |
+          cd src
+          test -f SubScraper.Core/Services/AuthSyncService.cs
+          grep -q "AuthSyncService" SubScraper.Cli/Program.cs
+          echo "OK: webhook patch markers present"
 
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
@@ -107,7 +124,7 @@ jobs:
           echo "exit=$CODE"
           if [ "$CODE" -eq 4 ]; then echo "FAIL: ffmpeg startup gate not passed"; exit 1; fi
           grep -q "ffmpeg/bin/ffmpeg" /tmp/bundled-test.txt || { echo "FAIL: bundled ffmpeg path not used"; exit 1; }
-          grep -q "9\\.0\\." /tmp/bundled-test.txt || { echo "FAIL: expected bundled 9.x version"; exit 1; }
+          grep -q "9\.0\." /tmp/bundled-test.txt || { echo "FAIL: expected bundled 9.x version"; exit 1; }
           if grep -q "/opt/homebrew" /tmp/bundled-test.txt; then echo "FAIL: Homebrew ffmpeg leaked in"; exit 1; fi
           echo "OK: app used bundled arm64 ffmpeg/ffprobe, gate passed"
 
@@ -287,10 +304,64 @@ jobs:
           ls -la SubScraperV1.0.13-osx-arm64.tar.gz
           tar -tzf SubScraperV1.0.13-osx-arm64.tar.gz | grep -E "config.conf$|cdm/devices/chrome_1610/device_|ffmpeg/bin/(ffmpeg|ffprobe)$" | sort
 
-      - name: Upload release tarball
-        uses: actions/upload-artifact@v4
-        with:
-          name: SubScraperV1.0.13-osx-arm64
-          path: SubScraperV1.0.13-osx-arm64.tar.gz
-          retention-days: 30
-          if-no-files-found: error
+      - name: Verify release tarball contents
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          tar -tzf SubScraperV1.0.13-osx-arm64.tar.gz | sort > /tmp/tarlist.txt
+          wc -l /tmp/tarlist.txt
+          for f in "./config.conf" \
+                   "./SubScraper.app/Contents/MacOS/config.conf" \
+                   "./cdm/devices/chrome_1610/device_client_id_blob" \
+                   "./cdm/devices/chrome_1610/device_private_key" \
+                   "./SubScraper.app/Contents/MacOS/cdm/devices/chrome_1610/device_client_id_blob" \
+                   "./SubScraper.app/Contents/MacOS/cdm/devices/chrome_1610/device_private_key" \
+                   "./ffmpeg/bin/ffmpeg" \
+                   "./ffmpeg/bin/ffprobe" \
+                   "./SubScraper.app/Contents/MacOS/ffmpeg/bin/ffmpeg" \
+                   "./SubScraper.app/Contents/MacOS/ffmpeg/bin/ffprobe" \
+                   "./SubScraper.app/Contents/MacOS/SubScraper" \
+                   "./SubScraper - Classic"; do
+            grep -qxF "$f" /tmp/tarlist.txt || { echo "FAIL: missing $f"; exit 1; }
+          done
+          echo "OK: all expected files present"
+          tar -xzOf SubScraperV1.0.13-osx-arm64.tar.gz ./config.conf | grep -q 'Name = "OnlyFans"' \
+            || { echo "FAIL: config missing OnlyFans site"; exit 1; }
+          if tar -xzOf SubScraperV1.0.13-osx-arm64.tar.gz ./config.conf | grep -q 'C:\\Users'; then
+            echo "FAIL: Windows path leaked into config"; exit 1
+          fi
+          echo "OK: config has OnlyFans site, no Windows paths"
+          BLOB_SIZE=$(tar -xzOf SubScraperV1.0.13-osx-arm64.tar.gz ./cdm/devices/chrome_1610/device_client_id_blob | wc -c)
+          KEY_SIZE=$(tar -xzOf SubScraperV1.0.13-osx-arm64.tar.gz ./cdm/devices/chrome_1610/device_private_key | wc -c)
+          echo "CDM blob bytes: $BLOB_SIZE, key bytes: $KEY_SIZE"
+          [ "$BLOB_SIZE" -gt 1000 ] || { echo "FAIL: blob too small"; exit 1; }
+          [ "$KEY_SIZE" -gt 1000 ] || { echo "FAIL: key too small"; exit 1; }
+          mkdir -p /tmp/tarcheck && tar -xzf SubScraperV1.0.13-osx-arm64.tar.gz -C /tmp/tarcheck
+          file /tmp/tarcheck/ffmpeg/bin/ffmpeg | grep -q "arm64" || { echo "FAIL: ffmpeg not arm64"; exit 1; }
+          file "/tmp/tarcheck/SubScraper - Classic" | grep -q "arm64" || { echo "FAIL: Classic not arm64"; exit 1; }
+          test -x /tmp/tarcheck/ffmpeg/bin/ffmpeg || { echo "FAIL: ffmpeg not executable"; exit 1; }
+          test -x "/tmp/tarcheck/SubScraper - Classic" || { echo "FAIL: Classic not executable"; exit 1; }
+          echo "OK: binaries are arm64 Mach-O with exec permission"
+          if [ -d /tmp/tarcheck/.playwright/node ]; then
+            ls /tmp/tarcheck/.playwright/node/
+            test -d /tmp/tarcheck/.playwright/node/darwin-arm64 || { echo "FAIL: darwin-arm64 node missing"; exit 1; }
+            test ! -e /tmp/tarcheck/.playwright/node/linux-x64 || { echo "FAIL: linux node leftover"; exit 1; }
+            test ! -e /tmp/tarcheck/.playwright/node/win-x64 || { echo "FAIL: windows node leftover"; exit 1; }
+            echo "OK: playwright node drivers are darwin-arm64 only"
+          fi
+          echo "OK: tarball contents fully verified"
+
+      - name: Create GitHub Release (direct .tar.gz download)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v1.0.13-macos-arm64"
+          cd "$GITHUB_WORKSPACE"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Deleting existing release $TAG"
+            gh release delete "$TAG" -y --cleanup-tag
+          fi
+          gh release create "$TAG" \
+            --title "SubScraper v1.0.13 macOS Apple Silicon" \
+            --notes "SubScraper for macOS 13+ (Apple Silicon arm64). Contents: SubScraper.app (GUI), SubScraper Classic (CLI), bundled ffmpeg/ffprobe 9.0.2 arm64, OnlyFans site config, CDM device keys. Install: tar -xzf SubScraperV1.0.13-osx-arm64.tar.gz" \
+            SubScraperV1.0.13-osx-arm64.tar.gz
+          echo "Direct download: https://github.com/Lkas2412/subscrapper/releases/download/$TAG/SubScraperV1.0.13-osx-arm64.tar.gz"
