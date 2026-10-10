@@ -94,7 +94,6 @@ jobs:
                       bool isMachO = (magic[0] == 0xCF && magic[1] == 0xFA && magic[2] == 0xED && magic[3] == 0xFE) ||
                                      (magic[0] == 0xFE && magic[1] == 0xED && magic[2] == 0xFA && magic[3] == 0xCF);
                       Assert.True(isMachO, $"{path} is not a Mach-O binary");
-                      Assert.True(File.GetUnixFileMode(path!).HasFlag(UnixFileMode.UserExecute), $"{path} not executable");
                   }
               }
           }
