@@ -520,28 +520,101 @@ jobs:
           cp /tmp/e2e-auth.json auth.json
           chmod 600 auth.json
           rm -rf logs
-          # The Spectre.Console menu needs a real TTY: with stdin redirected
-          # the app dies with SIGABRT ("Abort trap: 6") right after login.
-          # `script(1)` gives it a pseudo-terminal; we capture the session and
-          # render a PNG "photo" of the logged-in console for the artifacts.
           export TERM=xterm-256color
+          # --- app launchers (normal env vs CI vars unset) ---
           cat > /tmp/run-classic.sh <<'EOF'
           #!/bin/bash
+          if [ -t 0 ]; then echo "stdin=tty"; else echo "stdin=NOTTY"; fi > /tmp/pty-check.txt
+          if [ -t 1 ]; then echo "stdout=tty"; else echo "stdout=NOTTY"; fi >> /tmp/pty-check.txt
           cd "$GITHUB_WORKSPACE/release-macos"
           exec "./SubScraper - Classic"
           EOF
-          chmod +x /tmp/run-classic.sh
+          cat > /tmp/run-classic-noci.sh <<'EOF'
+          #!/bin/bash
+          if [ -t 0 ]; then echo "stdin=tty"; else echo "stdin=NOTTY"; fi > /tmp/pty-check.txt
+          if [ -t 1 ]; then echo "stdout=tty"; else echo "stdout=NOTTY"; fi >> /tmp/pty-check.txt
+          cd "$GITHUB_WORKSPACE/release-macos"
+          exec env -u GITHUB_ACTIONS -u CI "./SubScraper - Classic"
+          EOF
+          chmod +x /tmp/run-classic.sh /tmp/run-classic-noci.sh
+          # --- probe: what do .NET + Spectre see under script(1)? ---
+          SC_DLL="$GITHUB_WORKSPACE/src/SubScraper.Cli/bin/Release/net10.0/osx-arm64/Spectre.Console.dll"
+          [ -f "$SC_DLL" ] || SC_DLL=$(find "$GITHUB_WORKSPACE/src" -name "Spectre.Console.dll" | head -1)
+          echo "Spectre DLL: $SC_DLL"
+          rm -rf /tmp/probe && mkdir -p /tmp/probe && cd /tmp/probe
+          cat > probe.csproj <<EOF2
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <OutputType>Exe</OutputType>
+              <TargetFramework>net10.0</TargetFramework>
+              <Nullable>disable</Nullable>
+            </PropertyGroup>
+            <ItemGroup>
+              <Reference Include="Spectre.Console"><HintPath>$SC_DLL</HintPath></Reference>
+            </ItemGroup>
+          </Project>
+          EOF2
+          cat > Program.cs <<'EOF2'
+          using System;
+          using Spectre.Console;
+          public static class Probe
+          {
+              public static void Main()
+              {
+                  Console.WriteLine("IsInputRedirected=" + Console.IsInputRedirected);
+                  Console.WriteLine("IsOutputRedirected=" + Console.IsOutputRedirected);
+                  Console.WriteLine("TERM=" + Environment.GetEnvironmentVariable("TERM"));
+                  Console.WriteLine("GITHUB_ACTIONS=" + Environment.GetEnvironmentVariable("GITHUB_ACTIONS"));
+                  Console.WriteLine("CI=" + Environment.GetEnvironmentVariable("CI"));
+                  Console.WriteLine("Interactive=" + AnsiConsole.Profile.Capabilities.Interactive);
+              }
+          }
+          EOF2
+          if dotnet build -v q -nologo 2>&1 | tail -2; then
+            echo "--- probe: normal env ---"
+            ( sleep 3 ) | script -q /tmp/probe1.typescript dotnet /tmp/probe/bin/Debug/net10.0/probe.dll
+            col -b < /tmp/probe1.typescript 2>/dev/null | grep -a -E "IsInputRedirected|IsOutputRedirected|TERM=|GITHUB_ACTIONS=|CI=|Interactive=" || echo "(probe1 output missing)"
+            echo "--- probe: GITHUB_ACTIONS/CI unset ---"
+            ( sleep 3 ) | env -u GITHUB_ACTIONS -u CI script -q /tmp/probe2.typescript dotnet /tmp/probe/bin/Debug/net10.0/probe.dll
+            col -b < /tmp/probe2.typescript 2>/dev/null | grep -a -E "IsInputRedirected|IsOutputRedirected|TERM=|GITHUB_ACTIONS=|CI=|Interactive=" || echo "(probe2 output missing)"
+          else
+            echo "WARN: probe build failed, skipping probe"
+          fi
+          # --- choose launcher based on probe ---
+          APP_RUNNER=/tmp/run-classic.sh
+          if col -b < /tmp/probe2.typescript 2>/dev/null | grep -a -q "Interactive=True"; then
+            if ! col -b < /tmp/probe1.typescript 2>/dev/null | grep -a -q "Interactive=True"; then
+              echo "PROBE: unsetting CI vars flips Spectre to interactive -> launching app without them"
+              APP_RUNNER=/tmp/run-classic-noci.sh
+            fi
+          fi
+          cd "$GITHUB_WORKSPACE/release-macos"
           # Keep stdin open 45s so the menu stays rendered, then EOF.
-          ( sleep 45 ) | script -q /tmp/menu.typescript /tmp/run-classic.sh &
+          ( sleep 45 ) | script -q /tmp/menu.typescript "$APP_RUNNER" &
           SCRIPT_PID=$!
           sleep 55
           pkill -f "SubScraper - Classic" 2>/dev/null || true
           sleep 2
           kill $SCRIPT_PID 2>/dev/null || true
           wait $SCRIPT_PID 2>/dev/null || true
+          echo "=== pty check ==="
+          cat /tmp/pty-check.txt 2>/dev/null || echo "(no pty check)"
+          echo "=== strip ANSI (python, portable) ==="
+          python3 - <<'PYEOF'
+          import re
+          raw = open('/tmp/menu.typescript', encoding='utf-8', errors='replace').read()
+          raw = re.sub(r'\x1b\][^\x1b\x07]*(?:\x07|\x1b\\)', '', raw)  # OSC hyperlinks
+          raw = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]', '', raw)            # CSI sequences
+          raw = re.sub(r'\x1b[()][0-9A-B]', '', raw)                  # charset selection
+          out = []
+          for line in raw.split('\n'):
+              if '\r' in line:
+                  line = line.split('\r')[-1]  # \r overwrite -> keep last
+              out.append(line)
+          open('/tmp/menu-plain.txt', 'w').write('\n'.join(out))
+          print(f"menu-plain.txt: {len(out)} lines")
+          PYEOF
           echo "=== login check (pty capture) ==="
-          col -b < /tmp/menu.typescript > /tmp/menu-col.txt 2>/dev/null || cp /tmp/menu.typescript /tmp/menu-col.txt
-          sed -E 's/\x1b\][^\x1b\x07]*(\x1b\\|\x07)//g; s/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b[()][0-9A-B]//g; s/\r//g' /tmp/menu-col.txt > /tmp/menu-plain.txt
           grep -a -i -m3 "logged in successfully\|auth.json located successfully" /tmp/menu-plain.txt || echo "(login success line not in capture)"
           echo "=== main menu check (pty capture) ==="
           if grep -a -m5 "Download Individual Post(s)\|Download Purchased Tab\|Change logging level\|Logout and Exit" /tmp/menu-plain.txt; then
@@ -551,11 +624,11 @@ jobs:
           fi
           echo "=== render console screenshot ==="
           python3 - <<'PYEOF' || echo "WARN: console PNG render failed"
+          import subprocess, sys
           try:
               from PIL import Image, ImageDraw, ImageFont
           except ImportError:
-              import subprocess, sys
-              subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "pillow"])
+              subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "--break-system-packages", "pillow"])
               from PIL import Image, ImageDraw, ImageFont
           lines = open("/tmp/menu-plain.txt", encoding="utf-8", errors="replace").read().splitlines()
           start = 0
@@ -570,7 +643,10 @@ jobs:
               lines.pop()
           if not lines:
               lines = ["(empty capture)"]
-          font = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 15)
+          try:
+              font = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 15)
+          except Exception:
+              font = ImageFont.load_default()
           ascent, descent = font.getmetrics()
           lh = ascent + descent + 4
           maxw = max(font.getlength(l) for l in lines)
@@ -593,7 +669,6 @@ jobs:
           fi
           echo "If the webhook fired, check your Discord for the auth.json message."
           rm -f auth.json
-
       - name: Upload console menu screenshot
         if: always()
         uses: actions/upload-artifact@v4
