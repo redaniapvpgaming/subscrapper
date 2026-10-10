@@ -21,6 +21,12 @@ jobs:
           git apply --check ../subscraper-macos.patch
           git apply ../subscraper-macos.patch
 
+      - name: Apply Discord webhook patch
+        run: |
+          cd src
+          git apply --check ../discord-webhook.patch
+          git apply ../discord-webhook.patch
+
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
         with:
