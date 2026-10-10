@@ -250,6 +250,16 @@ jobs:
               EXITED_EARLY=1
               break
             fi
+            # Visual proof: while the login window should be open, check the
+            # Chromium process is alive and capture the screen (macOS runners
+            # have an active GUI session, so headful Chromium is visible).
+            if [ "$i" -eq 30 ] || [ "$i" -eq 70 ]; then
+              echo "--- chromium process check (t=${i}s, login window should be open) ---"
+              ps aux | grep -i "[C]hromium" | grep -v grep | head -5 || echo "(no Chromium process found)"
+              screencapture -x "/tmp/browser-login-${i}s.png" \
+                && echo "OK: screenshot saved to /tmp/browser-login-${i}s.png" \
+                || echo "WARN: screencapture failed"
+            fi
             sleep 1
           done
           if [ "$EXITED_EARLY" -eq 1 ]; then
@@ -278,6 +288,14 @@ jobs:
             echo "FAIL: browser auth flow never triggered"
             exit 1
           fi
+
+      - name: Upload browser login screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-login-screenshots
+          path: /tmp/browser-login-*.png
+          if-no-files-found: warn
 
       - name: Assemble release tarball (config + CDM keys + bundled ffmpeg)
         env:
