@@ -169,6 +169,14 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE/release-macos"
           rm -f auth.json
+          # Minimal config with Site.BaseUrl so startup reaches the auth flow
+          cat > config.conf <<'EOF'
+          Site {
+            Name = "OnlyFans"
+            BaseUrl = "https://onlyfans.com"
+            ApiPath = "/api2/v2"
+          }
+          EOF
           export PATH="$(cat /tmp/ffbin-dir.txt):$PATH"
           ./"SubScraper - Classic" < /dev/null > /tmp/browser-test.txt 2>&1 &
           PID=$!
