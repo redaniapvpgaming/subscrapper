@@ -71,29 +71,36 @@ jobs:
 
       - name: Test real ffmpeg bootstrap (new macOS code path)
         run: |
-          cd "$GITHUB_WORKSPACE"
-          rm -rf ffboottest && mkdir ffboottest && cd ffboottest
-          dotnet new console -n ffboot --output .
-          python3 - "$GITHUB_WORKSPACE" <<'PYEOF'
-          import sys
-          ws = sys.argv[1]
-          p = 'ffboot.csproj'
-          s = open(p).read()
-          ref = f'  <ItemGroup>\n    <ProjectReference Include="{ws}/src/SubScraper.Core/SubScraper.Core.csproj" />\n  </ItemGroup>\n'
-          s = s.replace('</Project>', ref + '</Project>')
-          open(p, 'w').write(s)
-          PYEOF
-          cat > Program.cs <<'EOF'
+          cat > src/SubScraper.Tests/Services/RealMacOSBootstrapTests.cs <<'EOF'
           using SubScraper.Core.Services;
-          var svc = new FfmpegBootstrapService();
-          var r = await svc.EnsureInstalledAsync();
-          Console.WriteLine($"SUCCESS={r.Success}");
-          Console.WriteLine($"FFMPEG={r.FfmpegPath}");
-          Console.WriteLine($"FFPROBE={r.FfprobePath}");
-          Console.WriteLine($"ERR={r.Error}");
-          return r.Success ? 0 : 1;
+          namespace SubScraper.Tests.Services;
+          public class RealMacOSBootstrapTests
+          {
+              [Fact]
+              public async Task RealMacOSBootstrap_DownloadsMachOArm64Binaries()
+              {
+                  var svc = new FfmpegBootstrapService();
+                  var result = await svc.EnsureInstalledAsync();
+                  Assert.True(result.Success, $"bootstrap failed: {result.Error}");
+                  Assert.True(File.Exists(result.FfmpegPath), "ffmpeg missing");
+                  Assert.True(File.Exists(result.FfprobePath), "ffprobe missing");
+                  foreach (string? path in new[] { result.FfmpegPath, result.FfprobePath })
+                  {
+                      byte[] magic = new byte[4];
+                      using (FileStream fs = File.OpenRead(path!))
+                      {
+                          fs.ReadExactly(magic);
+                      }
+                      bool isMachO = (magic[0] == 0xCF && magic[1] == 0xFA && magic[2] == 0xED && magic[3] == 0xFE) ||
+                                     (magic[0] == 0xFE && magic[1] == 0xED && magic[2] == 0xFA && magic[3] == 0xCF);
+                      Assert.True(isMachO, $"{path} is not a Mach-O binary");
+                      Assert.True(File.GetUnixFileMode(path!).HasFlag(UnixFileMode.UserExecute), $"{path} not executable");
+                  }
+              }
+          }
           EOF
-          dotnet run
+          cd src
+          dotnet test SubScraper.Tests/SubScraper.Tests.csproj --filter "FullyQualifiedName~RealMacOSBootstrap" -v minimal
 
       - name: Verify bootstrapped Mach-O ffmpeg
         run: |
