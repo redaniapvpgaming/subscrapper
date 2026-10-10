@@ -240,17 +240,32 @@ jobs:
           export PATH="$(cat /tmp/ffbin-dir.txt):$PATH"
           ./"SubScraper - Classic" < /dev/null > /tmp/browser-test.txt 2>&1 &
           PID=$!
+          EXITED_EARLY=0
           for i in $(seq 1 90); do
             if ! kill -0 $PID 2>/dev/null; then
+              EXITED_EARLY=1
               break
             fi
             sleep 1
           done
+          if [ "$EXITED_EARLY" -eq 1 ]; then
+            echo "DIAG: app exited on its own before 90s (did NOT wait for login - launch or navigation failed fast)"
+          else
+            echo "DIAG: app still running at 90s -> browser was open and waiting for login (killing for CI)"
+          fi
           kill $PID 2>/dev/null || true
           wait $PID 2>/dev/null || true
           cat /tmp/browser-test.txt
-          echo "=== log file ==="
-          cat logs/SubScraper.txt 2>/dev/null | tail -30 || echo "(no log file)"
+          echo "=== app log (Serilog appends date: SubScraperYYYYMMDD.txt) ==="
+          LOGFILE=$(ls -t logs/SubScraper*.txt 2>/dev/null | head -1)
+          if [ -n "$LOGFILE" ]; then
+            echo "Log file: $LOGFILE"
+            grep -E "Chromium already downloaded|Failed to download browser|Navigating to configured site|Waiting for user to login|Error getting auth from browser" "$LOGFILE" | tail -20
+            echo "--- exception detail ---"
+            grep -A 12 "Error getting auth from browser" "$LOGFILE" | head -30
+          else
+            echo "(no log file found in logs/)"
+          fi
           if grep -q "Preparing the browser" /tmp/browser-test.txt; then
             echo "OK: browser auth flow triggered (headful launch attempted - no display in CI as expected)"
           else
@@ -428,15 +443,32 @@ jobs:
           cd /tmp
           "/tmp/final-test/SubScraper - Classic.command" < /dev/null > /tmp/command-interactive-test.txt 2>&1 &
           LAUNCHER_PID=$!
+          EXITED_EARLY=0
           for i in $(seq 1 90); do
             if ! kill -0 $LAUNCHER_PID 2>/dev/null; then
+              EXITED_EARLY=1
               break
             fi
             sleep 1
           done
+          if [ "$EXITED_EARLY" -eq 1 ]; then
+            echo "DIAG: launcher exited on its own before 90s (did NOT wait for login - launch or navigation failed fast)"
+          else
+            echo "DIAG: launcher still running at 90s -> browser was open and waiting for login (killing for CI)"
+          fi
           kill $LAUNCHER_PID 2>/dev/null || true
           wait $LAUNCHER_PID 2>/dev/null || true
           cat /tmp/command-interactive-test.txt
+          echo "=== app log (Serilog appends date: SubScraperYYYYMMDD.txt) ==="
+          LOGFILE=$(ls -t /tmp/final-test/logs/SubScraper*.txt 2>/dev/null | head -1)
+          if [ -n "$LOGFILE" ]; then
+            echo "Log file: $LOGFILE"
+            grep -E "Chromium already downloaded|Failed to download browser|Navigating to configured site|Waiting for user to login|Error getting auth from browser" "$LOGFILE" | tail -20
+            echo "--- exception detail ---"
+            grep -A 12 "Error getting auth from browser" "$LOGFILE" | head -30
+          else
+            echo "(no log file found in /tmp/final-test/logs/)"
+          fi
           if grep -q "Preparing the browser" /tmp/command-interactive-test.txt; then
             echo "OK: double-click launcher triggers browser auth flow (headful launch attempted - no display in CI as expected)"
           else
