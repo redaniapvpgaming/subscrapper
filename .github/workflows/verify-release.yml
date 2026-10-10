@@ -134,8 +134,10 @@ jobs:
           if [ -n "$LOGFILE" ]; then
             echo "Log file: $LOGFILE"
             grep -E "Chromium already downloaded|Failed to download browser|Navigating to configured site|Waiting for user to login|Error getting auth from browser" "$LOGFILE" | tail -20
-            echo "--- exception detail ---"
-            grep -A 12 "Error getting auth from browser" "$LOGFILE" | head -30
+            echo "--- exception detail (30 lines from first [ERR]) ---"
+            grep -A 25 "\[ERR\]" "$LOGFILE" | head -30
+            echo "--- playwright browser cache ---"
+            ls -d ~/.cache/ms-playwright/chromium-* ~/Library/Caches/ms-playwright/chromium-* 2>/dev/null || echo "(no playwright chromium found in cache dirs)"
           else
             echo "(no log file found in /tmp/rel-test/logs/)"
           fi
