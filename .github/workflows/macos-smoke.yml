@@ -345,7 +345,7 @@ jobs:
           echo "OK: all expected files present"
           tar -xzOf SubScraperV1.0.13-osx-arm64.tar.gz ./config.conf | grep -q 'Name = "OnlyFans"' \
             || { echo "FAIL: config missing OnlyFans site"; exit 1; }
-          if tar -xzOf SubScraperV1.0.13-osx-arm64.tar.gz ./config.conf | grep -q 'C:\\Users'; then
+          if tar -xzOf SubScraperV1.0.13-osx-arm64.tar.gz ./config.conf | grep -q 'C:\\\\Users'; then
             echo "FAIL: Windows path leaked into config"; exit 1
           fi
           echo "OK: config has OnlyFans site, no Windows paths"
@@ -422,6 +422,27 @@ jobs:
           grep -q "9\.0\." /tmp/command-test.txt || { echo "FAIL: launcher did not detect 9.x"; exit 1; }
           test ! -f /tmp/config.conf || { echo "FAIL: launcher created stray config.conf in wrong cwd"; exit 1; }
           echo "OK: double-click launcher works (correct cwd, bundled ffmpeg, no stray files)"
+          # Interactive run via the launcher, like a real Finder double-click:
+          # the browser auth flow must trigger (no display in CI, so we only
+          # check that the flow starts).
+          cd /tmp
+          "/tmp/final-test/SubScraper - Classic.command" < /dev/null > /tmp/command-interactive-test.txt 2>&1 &
+          LAUNCHER_PID=$!
+          for i in $(seq 1 90); do
+            if ! kill -0 $LAUNCHER_PID 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          kill $LAUNCHER_PID 2>/dev/null || true
+          wait $LAUNCHER_PID 2>/dev/null || true
+          cat /tmp/command-interactive-test.txt
+          if grep -q "Preparing the browser" /tmp/command-interactive-test.txt; then
+            echo "OK: double-click launcher triggers browser auth flow (headful launch attempted - no display in CI as expected)"
+          else
+            echo "FAIL: launcher did not trigger browser auth flow"
+            exit 1
+          fi
 
       - name: Create GitHub Release (direct .tar.gz download)
         env:
