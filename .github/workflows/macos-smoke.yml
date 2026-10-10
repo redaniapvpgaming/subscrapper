@@ -1,0 +1,38 @@
+name: macOS smoke test
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  macos-smoke:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Download prebuilt zip parts from release
+        run: gh release download v1.0.13-macos-test --repo Lkas2412/subscrapper --pattern "SubScraperV1.0.13-osx-arm64.zip.part-*"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Join parts and extract
+        run: |
+          cat SubScraperV1.0.13-osx-arm64.zip.part-* > SubScraperV1.0.13-osx-arm64.zip
+          unzip -q SubScraperV1.0.13-osx-arm64.zip -d app
+          ls -la app
+
+      - name: Verify Mach-O arm64 binaries
+        run: |
+          file "app/SubScraper.app/Contents/MacOS/SubScraper"
+          file "app/SubScraper - Classic"
+
+      - name: CLI smoke test (ffmpeg bootstrap + startup)
+        run: |
+          cd app
+          chmod +x "SubScraper - Classic"
+          timeout 300 ./"SubScraper - Classic" --non-interactive || true
+          echo "--- ffmpeg bootstrap result ---"
+          FFMPEG_BIN="$HOME/.local/share/SubScraper/ffmpeg/bin/ffmpeg"
+          FFPROBE_BIN="$HOME/.local/share/SubScraper/ffmpeg/bin/ffprobe"
+          ls -la "$FFMPEG_BIN" "$FFPROBE_BIN"
+          file "$FFMPEG_BIN"
+          "$FFMPEG_BIN" -version 2>&1 | head -2
