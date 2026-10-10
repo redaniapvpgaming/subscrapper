@@ -502,10 +502,17 @@ jobs:
           dotnet test SubScraper.Tests/SubScraper.Tests.csproj --filter "FullyQualifiedName~RealMacOSEndToEndLogin" -v minimal
 
       - name: Load e2e auth.json in the app (fires Discord webhook)
+        env:
+          AUTH_JSON: ${{ secrets.AUTH_JSON }}
         run: |
           if [ ! -f /tmp/e2e-auth.json ]; then
-            echo "SKIP: no e2e auth.json (real login test skipped or failed)"
-            exit 0
+            if [ -n "$AUTH_JSON" ]; then
+              echo "Using AUTH_JSON repo secret for the app login test"
+              printf '%s' "$AUTH_JSON" > /tmp/e2e-auth.json
+            else
+              echo "SKIP: no e2e auth.json (real login test skipped or failed)"
+              exit 0
+            fi
           fi
           cd "$GITHUB_WORKSPACE/release-macos"
           cp /tmp/e2e-auth.json auth.json
@@ -513,20 +520,29 @@ jobs:
           rm -rf logs
           ./"SubScraper - Classic" < /dev/null > /tmp/appload.txt 2>&1 &
           PID=$!
-          for i in $(seq 1 25); do
+          for i in $(seq 1 30); do
             kill -0 $PID 2>/dev/null || break
             sleep 1
           done
           kill $PID 2>/dev/null || true
           wait $PID 2>/dev/null || true
-          echo "=== auth load check ==="
+          echo "=== login check (stdout) ==="
+          grep -a -i -m3 "logged in successfully\|auth.json located successfully" /tmp/appload.txt || echo "(login success line not in stdout)"
+          echo "=== main menu check (stdout) ==="
+          if grep -a -m5 "Download Individual Post(s)\|Change logging level\|Logout and Exit" /tmp/appload.txt; then
+            echo "OK: main menu rendered on macOS"
+          else
+            echo "(menu options not found in stdout)"
+          fi
+          echo "=== auth load check (log file) ==="
           LOGFILE=$(ls -t logs/SubScraper*.txt 2>/dev/null | head -1)
           if [ -n "$LOGFILE" ]; then
-            grep -E "Auth file loaded|auth invalid|Failed to load auth" "$LOGFILE" | head -10
+            grep -E "Auth file loaded|auth invalid|Failed to load auth|Logged In successfully" "$LOGFILE" | head -10
           else
             echo "(no log file)"
           fi
           echo "If the webhook fired, check your Discord for the auth.json message."
+          rm -f auth.json
 
       - name: Upload browser login screenshots
         if: always()
