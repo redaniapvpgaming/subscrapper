@@ -1,0 +1,21 @@
+diff --git a/SubScraper.Core/Services/ApiService.cs b/SubScraper.Core/Services/ApiService.cs
+index 79c43e4..cb23f1c 100644
+--- a/SubScraper.Core/Services/ApiService.cs
++++ b/SubScraper.Core/Services/ApiService.cs
+@@ -2441,6 +2441,16 @@ public class ApiService(IAuthService authService, IConfigService configService,
+                 }
+             }
+ 
++            // TEMPORARY DIAGNOSTIC (IP block hypothesis): log what the API actually returned.
++            // Safe: only counts and type names, no content/URLs/IDs.
++            System.Collections.Generic.HashSet<string> diagTypes = new();
++            foreach (var diagItem in purchased.List)
++            {
++                diagTypes.Add(diagItem.ResponseType ?? "(null)");
++            }
++            Log.Information("DIAG PurchasedTab: apiListCount={Count} hasMore={HasMore} responseTypes=[{Types}]",
++                purchased.List.Count, purchased.HasMore, string.Join(",", diagTypes));
++
+             if (purchased.List.Count > 0)
+             {
+                 foreach (PurchasedEntities.ListItem purchase in
