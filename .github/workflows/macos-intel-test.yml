@@ -10,7 +10,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Check out test repo
         uses: actions/checkout@v4
@@ -134,3 +134,12 @@ jobs:
           name: SubScraperV1.0.13-osx-x64-TEST
           path: /tmp/SubScraperV1.0.13-osx-x64-TEST.tar.gz
           if-no-files-found: error
+
+      - name: Publish Intel test release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v1.0.13-macos-x64"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "SubScraper v1.0.13 macOS Intel (x86_64)" --notes "Test build for Intel Macs (x86_64). Download the tarball below." --prerelease
+          gh release upload "$TAG" /tmp/SubScraperV1.0.13-osx-x64-TEST.tar.gz --clobber
+          echo "OK: published to release $TAG"
