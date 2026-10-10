@@ -627,6 +627,9 @@ jobs:
           test -s cdm/devices/chrome_1610/device_private_key
           echo "OK: CDM keys placed for download test"
           cp config.conf /tmp/config.conf.bak
+          # Verbose logging for the test so download progress is visible
+          # in real time (restored afterwards)
+          sed -i '' 's/LoggingLevel = "error"/LoggingLevel = "information"/' config.conf
           cat >> config.conf <<'EOF'
           Interaction {
             NonInteractiveMode = true
@@ -636,7 +639,9 @@ jobs:
           cat > /tmp/terminal-download.sh <<EOF
           #!/bin/bash
           cd "$GITHUB_WORKSPACE/release-macos"
-          env -u GITHUB_ACTIONS -u CI "./SubScraper - Classic" --non-interactive
+          # Full console output goes to file (Terminal window will be blank,
+          # but everything is captured for the artifact)
+          env -u GITHUB_ACTIONS -u CI "./SubScraper - Classic" --non-interactive > /tmp/download-console-full.txt 2>&1
           EOF
           chmod +x /tmp/terminal-download.sh
           # Real-time progress: stream the Serilog log into the Actions output
@@ -661,23 +666,40 @@ jobs:
               || echo "WARN: progress screenshot $i failed"
           done
           kill $TAIL_PID 2>/dev/null || true
+          pkill -f "SubScraper - Classic" 2>/dev/null || true
+          sleep 2
+          osascript -e 'tell application "Terminal" to quit' 2>/dev/null || true
           echo "=== downloaded files ==="
           find . -path ./ffmpeg -prune -o -path ./.playwright -prune -o -type f -newer /tmp/config.conf.bak -print 2>/dev/null | grep -v -E "^\./(logs|chromium-data)" | head -30
           echo "--- total new files:"
           find . -path ./ffmpeg -prune -o -path ./.playwright -prune -o -type f -newer /tmp/config.conf.bak -print 2>/dev/null | grep -v -E "^\./(logs|chromium-data)" | wc -l
-          pkill -f "SubScraper - Classic" 2>/dev/null || true
-          sleep 2
-          osascript -e 'tell application "Terminal" to quit' 2>/dev/null || true
-          echo "=== log tail (download activity) ==="
+          echo "=== __user_data__ structure ==="
+          find __user_data__ -type f 2>/dev/null | head -40
+          echo "--- total files in __user_data__:"
+          find __user_data__ -type f 2>/dev/null | wc -l
+          echo "=== full console output (last 80 lines) ==="
+          tail -80 /tmp/download-console-full.txt 2>/dev/null || echo "(no console capture)"
+          # Save logs for the artifact (before cleanup)
           LOGFILE=$(ls -t logs/SubScraper*.txt 2>/dev/null | head -1)
           if [ -n "$LOGFILE" ]; then
-            grep -a -i -m25 "downloaded\|downloading\|purchased\|saved to" "$LOGFILE" | head -25
+            cp "$LOGFILE" /tmp/download-serilog.txt
+            echo "OK: Serilog log saved ($(wc -l < /tmp/download-serilog.txt) lines)"
           else
-            echo "(no log file)"
+            echo "WARN: no Serilog log file found"
           fi
-          # Restore config and clean test leftovers (assembly rebuilds config anyway)
+          # Pack downloads for the artifact (user wants to verify videos play)
+          if [ -d __user_data__ ]; then
+            tar -czf /tmp/downloaded-files.tar.gz __user_data__ 2>/dev/null
+            echo "OK: downloads packed ($(du -h /tmp/downloaded-files.tar.gz | cut -f1))"
+          else
+            echo "(no __user_data__ to pack)"
+          fi
+          # Restore config and clean test leftovers.
+          # IMPORTANT: __user_data__ from the test must NOT end up in the
+          # release tarball, so it is deleted here AFTER the artifact pack.
           cp /tmp/config.conf.bak config.conf
-          rm -rf auth.json users.db logs
+          rm -rf auth.json users.db logs __user_data__
+          echo "OK: download test finished (config restored, test data cleaned)"
 
       - name: Upload download test screenshots
         if: always()
@@ -685,6 +707,24 @@ jobs:
         with:
           name: download-test-screenshots
           path: /tmp/download-progress-*.png
+          if-no-files-found: warn
+
+      - name: Upload download test logs (full console + Serilog)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: download-test-logs
+          path: |
+            /tmp/download-console-full.txt
+            /tmp/download-serilog.txt
+          if-no-files-found: warn
+
+      - name: Upload downloaded files (verify videos play)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: download-test-files
+          path: /tmp/downloaded-files.tar.gz
           if-no-files-found: warn
 
       - name: Upload console menu screenshot
