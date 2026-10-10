@@ -93,6 +93,8 @@ jobs:
       - name: Test bundled ffmpeg with restricted PATH (no installs)
         run: |
           cd "$GITHUB_WORKSPACE/release-macos"
+          # Simulate a clean Mac: hide Homebrew (/opt/homebrew/bin) from PATH.
+          # The app must resolve ONLY the bundled ffmpeg/bin binaries.
           export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
           command -v ffmpeg >/dev/null 2>&1 && { echo "FAIL: ffmpeg still visible on PATH"; exit 1; }
           cp "$GITHUB_WORKSPACE/outosx-arm64-cli/SubScraper.Cli" "./SubScraper - Classic"
@@ -105,7 +107,7 @@ jobs:
           echo "exit=$CODE"
           if [ "$CODE" -eq 4 ]; then echo "FAIL: ffmpeg startup gate not passed"; exit 1; fi
           grep -q "ffmpeg/bin/ffmpeg" /tmp/bundled-test.txt || { echo "FAIL: bundled ffmpeg path not used"; exit 1; }
-          grep -q "9\.0\." /tmp/bundled-test.txt || { echo "FAIL: expected bundled 9.x version"; exit 1; }
+          grep -q "9\\.0\\." /tmp/bundled-test.txt || { echo "FAIL: expected bundled 9.x version"; exit 1; }
           if grep -q "/opt/homebrew" /tmp/bundled-test.txt; then echo "FAIL: Homebrew ffmpeg leaked in"; exit 1; fi
           echo "OK: app used bundled arm64 ffmpeg/ffprobe, gate passed"
 
@@ -203,6 +205,7 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE/release-macos"
           rm -f auth.json
+          # Minimal config with Site.BaseUrl so startup reaches the auth flow
           cat > config.conf <<'EOF'
           Site {
             Name = "OnlyFans"
@@ -231,3 +234,63 @@ jobs:
             echo "FAIL: browser auth flow never triggered"
             exit 1
           fi
+
+      - name: Assemble release tarball (config + CDM keys + bundled ffmpeg)
+        env:
+          CONFIG_CONF: ${{ secrets.CONFIG_CONF }}
+          CDM_BLOB_B64: ${{ secrets.CDM_CLIENT_ID_BLOB_B64 }}
+          CDM_KEY_B64: ${{ secrets.CDM_PRIVATE_KEY_B64 }}
+        run: |
+          if [ -z "$CDM_BLOB_B64" ] || [ -z "$CDM_KEY_B64" ]; then
+            echo "FAIL: set CDM_CLIENT_ID_BLOB_B64 and CDM_PRIVATE_KEY_B64 repo secrets (base64 of the .bin files)"
+            exit 1
+          fi
+          cd "$GITHUB_WORKSPACE/release-macos"
+          if [ -n "$CONFIG_CONF" ]; then
+            printf '%s' "$CONFIG_CONF" > config.conf
+          else
+            cat > config.conf <<'EOF'
+          Site {
+            Name = "OnlyFans"
+            BaseUrl = "https://onlyfans.com"
+            ApiPath = "/api2/v2"
+            DrmCdnHost = "cdn2.onlyfans.com"
+          }
+          Auth {
+            DisableBrowserAuth = false
+          }
+          External {
+            FFmpegPath = ""
+            FFprobePath = ""
+          }
+          EOF
+          fi
+          python3 - <<'PYEOF'
+          import re
+          s = open('config.conf').read()
+          s = re.sub(r'FFmpegPath = "[^"]*"', 'FFmpegPath = ""', s)
+          s = re.sub(r'FFprobePath = "[^"]*"', 'FFprobePath = ""', s)
+          open('config.conf', 'w').write(s)
+          m = re.search(r'Name = "([^"]+)"', s)
+          print("config Site:", m.group(1) if m else "?")
+          PYEOF
+          cp config.conf "SubScraper.app/Contents/MacOS/config.conf"
+          mkdir -p cdm/devices/chrome_1610 "SubScraper.app/Contents/MacOS/cdm/devices/chrome_1610"
+          printf '%s' "$CDM_BLOB_B64" | base64 -d > cdm/devices/chrome_1610/device_client_id_blob
+          printf '%s' "$CDM_KEY_B64" | base64 -d > cdm/devices/chrome_1610/device_private_key
+          cp cdm/devices/chrome_1610/device_client_id_blob cdm/devices/chrome_1610/device_private_key "SubScraper.app/Contents/MacOS/cdm/devices/chrome_1610/"
+          test -s cdm/devices/chrome_1610/device_client_id_blob
+          test -s cdm/devices/chrome_1610/device_private_key
+          echo "OK: CDM keys placed"
+          cd "$GITHUB_WORKSPACE"
+          tar -czf SubScraperV1.0.13-osx-arm64.tar.gz -C release-macos .
+          ls -la SubScraperV1.0.13-osx-arm64.tar.gz
+          tar -tzf SubScraperV1.0.13-osx-arm64.tar.gz | grep -E "config.conf$|cdm/devices/chrome_1610/device_|ffmpeg/bin/(ffmpeg|ffprobe)$" | sort
+
+      - name: Upload release tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: SubScraperV1.0.13-osx-arm64
+          path: SubScraperV1.0.13-osx-arm64.tar.gz
+          retention-days: 30
+          if-no-files-found: error
