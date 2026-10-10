@@ -237,6 +237,10 @@ jobs:
             DrmCdnHost = "cdn2.onlyfans.com"
           }
           EOF
+          # Playwright driver (.playwright/) must sit next to the single-file
+          # binary, otherwise Playwright.CreateAsync() throws "Driver not found"
+          rm -rf .playwright
+          cp -R "$GITHUB_WORKSPACE/outosx-arm64-cli/.playwright" .
           export PATH="$(cat /tmp/ffbin-dir.txt):$PATH"
           ./"SubScraper - Classic" < /dev/null > /tmp/browser-test.txt 2>&1 &
           PID=$!
@@ -330,6 +334,14 @@ jobs:
           EOF
           chmod +x "SubScraper - Classic.command"
           echo "OK: Classic double-click launcher created"
+          # Playwright driver for the Classic single-file binary (same lookup
+          # as the .app bundle: <appdir>/.playwright/node/darwin-arm64/node).
+          # Without it, Playwright.CreateAsync() throws "Driver not found" and
+          # the browser login flow never starts.
+          rm -rf .playwright
+          cp -R "$GITHUB_WORKSPACE/outosx-arm64-cli/.playwright" .
+          test -x .playwright/node/darwin-arm64/node || { echo "FAIL: playwright node driver missing/not executable"; exit 1; }
+          echo "OK: Classic playwright driver in place"
           # Never ship CI leftovers or a stale auth.json in the release tarball
           rm -rf logs chromium-data auth.json "SubScraper.app/Contents/MacOS/logs"
           cd "$GITHUB_WORKSPACE"
@@ -356,7 +368,8 @@ jobs:
                    "./SubScraper - Classic" \
                    "./SubScraper - Classic.command" \
                    "./rules.json" \
-                   "./chromium-scripts/stealth.min.js"; do
+                   "./chromium-scripts/stealth.min.js" \
+                   "./.playwright/node/darwin-arm64/node"; do
             grep -qxF "$f" /tmp/tarlist.txt || { echo "FAIL: missing $f"; exit 1; }
           done
           echo "OK: all expected files present"
