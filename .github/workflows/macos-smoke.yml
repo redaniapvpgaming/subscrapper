@@ -109,6 +109,22 @@ jobs:
           file ffmpeg/bin/ffprobe | grep -q "arm64"
           echo "OK: bundled ffmpeg/ffprobe are native arm64"
 
+      - name: Bundle SQLite native library (macOS single-file fix)
+        run: |
+          # Microsoft.Data.Sqlite cannot resolve the e_sqlite3 native library
+          # from the single-file bundle at runtime on macOS, so ship
+          # libe_sqlite3.dylib (osx-arm64) next to the binaries. DbService
+          # preloads it explicitly on macOS (see the macOS patch).
+          SQLITE_DYLIB=$(find "$HOME/.nuget/packages/sqlitepclraw.lib.e_sqlite3" \
+            -path "*runtimes/osx-arm64/native/libe_sqlite3.dylib" 2>/dev/null | head -1)
+          test -f "$SQLITE_DYLIB" || { echo "FAIL: libe_sqlite3.dylib (osx-arm64) not found in NuGet cache"; exit 1; }
+          file "$SQLITE_DYLIB" | grep -q "arm64" || { echo "FAIL: sqlite dylib is not arm64"; exit 1; }
+          cd "$GITHUB_WORKSPACE/release-macos"
+          cp "$SQLITE_DYLIB" .
+          cp "$SQLITE_DYLIB" "SubScraper.app/Contents/MacOS/"
+          ls -la libe_sqlite3.dylib "SubScraper.app/Contents/MacOS/libe_sqlite3.dylib"
+          echo "OK: libe_sqlite3.dylib (osx-arm64) bundled next to the binaries"
+
       - name: Test bundled ffmpeg with restricted PATH (no installs)
         run: |
           cd "$GITHUB_WORKSPACE/release-macos"
@@ -519,7 +535,7 @@ jobs:
           cd "$GITHUB_WORKSPACE/release-macos"
           cp /tmp/e2e-auth.json auth.json
           chmod 600 auth.json
-          rm -rf logs
+          rm -rf logs users.db
           export TERM=xterm-256color
           # --- app launchers (normal env vs CI vars unset) ---
           cat > /tmp/run-classic.sh <<'EOF'
@@ -668,7 +684,20 @@ jobs:
             echo "(no log file)"
           fi
           echo "If the webhook fired, check your Discord for the auth.json message."
-          rm -f auth.json
+          echo "=== users.db check (SQLite native lib fix) ==="
+          if [ -f users.db ]; then
+            echo "OK: users.db created on macOS"
+            ls -la users.db
+          else
+            echo "(users.db NOT created)"
+          fi
+          if grep -a -q "type initializer for 'Microsoft.Data.Sqlite.SqliteConnection'" /tmp/menu-plain.txt; then
+            echo "FAIL: SQLite native library still not loading"
+          else
+            echo "OK: no SQLite exception in console capture"
+          fi
+          # Never ship the test database or auth in the release tarball
+          rm -f users.db auth.json
       - name: Upload console menu screenshot
         if: always()
         uses: actions/upload-artifact@v4
@@ -755,7 +784,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           tar -czf SubScraperV1.0.13-osx-arm64.tar.gz -C release-macos .
           ls -la SubScraperV1.0.13-osx-arm64.tar.gz
-          tar -tzf SubScraperV1.0.13-osx-arm64.tar.gz | grep -E "config.conf$|cdm/devices/chrome_1610/device_|ffmpeg/bin/(ffmpeg|ffprobe)$" | sort
+          tar -tzf SubScraperV1.0.13-osx-arm64.tar.gz | grep -E "config.conf$|cdm/devices/chrome_1610/device_|ffmpeg/bin/(ffmpeg|ffprobe)$|libe_sqlite3.dylib$" | sort
 
       - name: Verify release tarball contents
         run: |
