@@ -116,6 +116,13 @@ jobs:
           command -v ffmpeg >/dev/null 2>&1 && { echo "FAIL: ffmpeg still visible on PATH"; exit 1; }
           cp "$GITHUB_WORKSPACE/outosx-arm64-cli/SubScraper.Cli" "./SubScraper - Classic"
           chmod +x "SubScraper - Classic"
+          # Content files the CLI needs next to the binary (the publish output has
+          # them, but copying only the single binary would drop them)
+          cp "$GITHUB_WORKSPACE/outosx-arm64-cli/rules.json" .
+          rm -rf chromium-scripts
+          cp -R "$GITHUB_WORKSPACE/outosx-arm64-cli/chromium-scripts" .
+          test -s chromium-scripts/stealth.min.js || { echo "FAIL: stealth.min.js not copied"; exit 1; }
+          echo "OK: Classic content files in place (rules.json, chromium-scripts)"
           set +e
           ./"SubScraper - Classic" --non-interactive > /tmp/bundled-test.txt 2>&1
           CODE=$?
@@ -206,7 +213,6 @@ jobs:
           export PATH="$(cat /tmp/ffbin-dir.txt):$PATH"
           cp "$GITHUB_WORKSPACE/outosx-arm64-cli/SubScraper.Cli" "./SubScraper - Classic"
           mkdir -p chromium-scripts
-          cp "$GITHUB_WORKSPACE/src/chromium-scripts/stealth.min.js" ./chromium-scripts/ 2>/dev/null || true
           chmod +x "SubScraper - Classic"
           set +e
           ./"SubScraper - Classic" --non-interactive > /tmp/cli-out.txt 2>&1
@@ -307,6 +313,8 @@ jobs:
           EOF
           chmod +x "SubScraper - Classic.command"
           echo "OK: Classic double-click launcher created"
+          # Never ship CI leftovers or a stale auth.json in the release tarball
+          rm -rf logs chromium-data auth.json "SubScraper.app/Contents/MacOS/logs"
           cd "$GITHUB_WORKSPACE"
           tar -czf SubScraperV1.0.13-osx-arm64.tar.gz -C release-macos .
           ls -la SubScraperV1.0.13-osx-arm64.tar.gz
@@ -329,7 +337,9 @@ jobs:
                    "./SubScraper.app/Contents/MacOS/ffmpeg/bin/ffprobe" \
                    "./SubScraper.app/Contents/MacOS/SubScraper" \
                    "./SubScraper - Classic" \
-                   "./SubScraper - Classic.command"; do
+                   "./SubScraper - Classic.command" \
+                   "./rules.json" \
+                   "./chromium-scripts/stealth.min.js"; do
             grep -qxF "$f" /tmp/tarlist.txt || { echo "FAIL: missing $f"; exit 1; }
           done
           echo "OK: all expected files present"
@@ -350,6 +360,9 @@ jobs:
           test -x /tmp/tarcheck/ffmpeg/bin/ffmpeg || { echo "FAIL: ffmpeg not executable"; exit 1; }
           test -x "/tmp/tarcheck/SubScraper - Classic" || { echo "FAIL: Classic not executable"; exit 1; }
           echo "OK: binaries are arm64 Mach-O with exec permission"
+          test -s /tmp/tarcheck/rules.json || { echo "FAIL: Classic rules.json missing or empty in tarball"; exit 1; }
+          test -s /tmp/tarcheck/chromium-scripts/stealth.min.js || { echo "FAIL: Classic stealth.min.js missing or empty in tarball"; exit 1; }
+          echo "OK: Classic has rules.json and chromium-scripts in tarball"
           if [ -d /tmp/tarcheck/.playwright/node ]; then
             ls /tmp/tarcheck/.playwright/node/
             test -d /tmp/tarcheck/.playwright/node/darwin-arm64 || { echo "FAIL: darwin-arm64 node missing"; exit 1; }
@@ -422,6 +435,6 @@ jobs:
           fi
           gh release create "$TAG" \
             --title "SubScraper v1.0.13 macOS Apple Silicon" \
-            --notes "SubScraper for macOS 13+ (Apple Silicon arm64). Contents: SubScraper.app (GUI), SubScraper Classic (CLI), Classic double-click launcher, bundled ffmpeg/ffprobe 9.0.2 arm64, OnlyFans site config, CDM device keys. Install: tar -xzf SubScraperV1.0.13-osx-arm64.tar.gz" \
+            --notes "SubScraper for macOS 13+ (Apple Silicon arm64). Contents: SubScraper.app (GUI), SubScraper Classic (CLI) + double-click launcher, bundled ffmpeg/ffprobe 9.0.2 arm64, OnlyFans site config, CDM device keys. Install: tar -xzf SubScraperV1.0.13-osx-arm64.tar.gz" \
             SubScraperV1.0.13-osx-arm64.tar.gz
           echo "Direct download: https://github.com/Lkas2412/subscrapper/releases/download/$TAG/SubScraperV1.0.13-osx-arm64.tar.gz"
