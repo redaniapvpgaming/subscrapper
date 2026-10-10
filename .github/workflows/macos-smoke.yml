@@ -144,6 +144,8 @@ jobs:
           printf '%s' "$AUTH_JSON" > auth.json
           printf '%s' "$CONFIG_CONF" > config.conf
           chmod 600 auth.json config.conf
+          # Sanitize Windows-only ffmpeg paths for the macOS test (let auto-detect/PATH handle it)
+          sed -i.bak '/FFmpegPath/d; /FFprobePath/d' config.conf && rm -f config.conf.bak
           export PATH="$(cat /tmp/ffbin-dir.txt):$PATH"
           ./"SubScraper - Classic" --non-interactive > /tmp/auth-test.txt 2>&1 &
           PID=$!
