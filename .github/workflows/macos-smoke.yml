@@ -119,6 +119,34 @@ jobs:
           test -x "$BIN/ffmpeg" && test -x "$BIN/ffprobe"
           "$BIN/ffmpeg" -version 2>&1 | head -2
 
+      - name: Test Playwright Chromium launch (browser stack for login)
+        run: |
+          cat > src/SubScraper.Tests/Services/RealMacOSBrowserTests.cs <<'EOF'
+          using Microsoft.Playwright;
+          namespace SubScraper.Tests.Services;
+          public class RealMacOSBrowserTests
+          {
+              [Fact]
+              public async Task Playwright_CanLaunchChromiumHeadless()
+              {
+                  int exitCode = await Task.Run(() => Program.Main(new[] { "install", "chromium" }));
+                  Assert.Equal(0, exitCode);
+                  using IPlaywright playwright = await Playwright.CreateAsync();
+                  await using IBrowser browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+                  {
+                      Headless = true,
+                      Args = new[] { "--no-sandbox", "--disable-setuid-sandbox" }
+                  });
+                  IPage page = await browser.NewPageAsync();
+                  await page.GotoAsync("https://example.com");
+                  string title = await page.TitleAsync();
+                  Assert.Contains("Example", title, StringComparison.OrdinalIgnoreCase);
+              }
+          }
+          EOF
+          cd src
+          dotnet test SubScraper.Tests/SubScraper.Tests.csproj --filter "FullyQualifiedName~RealMacOSBrowser" -v minimal
+
       - name: CLI startup gate (ffmpeg on PATH)
         run: |
           cd "$GITHUB_WORKSPACE/release-macos"
