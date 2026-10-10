@@ -147,16 +147,17 @@ index 6ce938a..6e2ad95 100644
  
      public bool FfprobePathAutoDetected { get; set; }
 diff --git a/SubScraper.Core/Services/FfmpegBootstrapService.cs b/SubScraper.Core/Services/FfmpegBootstrapService.cs
-index 362d795..3a52fc9 100644
+index 362d795..64e8ee1 100644
 --- a/SubScraper.Core/Services/FfmpegBootstrapService.cs
 +++ b/SubScraper.Core/Services/FfmpegBootstrapService.cs
-@@ -1,4 +1,5 @@
+@@ -1,4 +1,6 @@
  using System.Buffers;
 +using System.Buffers.Binary;
++using System.Diagnostics;
  using System.IO.Compression;
  using System.Net.Http.Headers;
  using System.Runtime.InteropServices;
-@@ -22,12 +23,21 @@ public sealed class FfmpegBootstrapService : IFfmpegBootstrapService
+@@ -22,12 +24,21 @@ public sealed class FfmpegBootstrapService : IFfmpegBootstrapService
      private const int MaximumReleaseJsonBytes = 2 * 1024 * 1024;
      private static readonly Uri s_latestReleaseApiUri =
          new("https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/latest");
@@ -178,7 +179,7 @@ index 362d795..3a52fc9 100644
      private readonly long _minimumAssetBytes;
      private readonly long _maximumAssetBytes;
  
-@@ -38,7 +48,8 @@ public sealed class FfmpegBootstrapService : IFfmpegBootstrapService
+@@ -38,7 +49,8 @@ public sealed class FfmpegBootstrapService : IFfmpegBootstrapService
              RuntimeInformation.OSArchitecture,
              OperatingSystem.IsWindows(),
              DefaultMinimumAssetBytes,
@@ -188,7 +189,7 @@ index 362d795..3a52fc9 100644
      {
      }
  
-@@ -48,22 +59,29 @@ public sealed class FfmpegBootstrapService : IFfmpegBootstrapService
+@@ -48,22 +60,29 @@ public sealed class FfmpegBootstrapService : IFfmpegBootstrapService
          Architecture osArchitecture,
          bool isWindows,
          long minimumAssetBytes = DefaultMinimumAssetBytes,
@@ -220,7 +221,7 @@ index 362d795..3a52fc9 100644
                  "with your operating system's package manager or configure their paths manually.");
          }
  
-@@ -166,6 +184,198 @@ public sealed class FfmpegBootstrapService : IFfmpegBootstrapService
+@@ -166,6 +185,362 @@ public sealed class FfmpegBootstrapService : IFfmpegBootstrapService
          }
      }
  
@@ -237,6 +238,27 @@ index 362d795..3a52fc9 100644
 +
 +        string ffmpegRoot = Path.Combine(_localAppDataPath, "SubScraper", "ffmpeg");
 +        string installDirectory = Path.Combine(ffmpegRoot, target);
++
++        // On Apple Silicon, prefer a native Homebrew ffmpeg when brew is available: no Rosetta
++        // needed and better performance. Falls back to the Intel-only ffbinaries build below.
++        if (_osArchitecture == Architecture.Arm64 &&
++            await TryInstallViaBrewAsync(cancellationToken) is { } brewResult)
++        {
++            return brewResult;
++        }
++
++        // The ffbinaries macOS build is Intel-only. On Apple Silicon it needs Rosetta 2, and a
++        // bare exec() never triggers macOS's on-demand install prompt, so check upfront instead
++        // of downloading 80 MB first and failing later with "Bad CPU type in executable".
++        if (_osArchitecture == Architecture.Arm64 && !IsRosettaInstalled())
++        {
++            return FfmpegBootstrapResult.Failed(
++                "SubScraper could not install FFmpeg for macOS: Rosetta 2 is not installed. " +
++                "The macOS FFmpeg build is Intel-only and requires Rosetta 2 on Apple Silicon Macs. " +
++                "Install it with `softwareupdate --install-rosetta --agree-to-license`, then retry. " +
++                "Alternatively install it with `brew install ffmpeg` or configure FFmpegPath and " +
++                "FFprobePath manually.");
++        }
 +
 +        try
 +        {
@@ -368,6 +390,148 @@ index 362d795..3a52fc9 100644
 +        {
 +            throw new InvalidDataException($"The downloaded {toolName} is not a valid macOS executable.");
 +        }
++
++        // A valid Mach-O is not enough: on Apple Silicon without Rosetta 2 the Intel-only
++        // binary fails at exec time with "Bad CPU type in executable" (errno 86), and a bare
++        // exec() never triggers macOS's on-demand Rosetta install prompt. Probe it now so the
++        // user gets the Rosetta hint instead of a confusing failure later.
++        if (!await CanExecuteToolAsync(toolPath, cancellationToken))
++        {
++            throw new InvalidDataException(
++                $"The downloaded {toolName} could not be executed. " +
++                "On Apple Silicon Macs the macOS build is Intel-only and requires Rosetta 2 " +
++                "(`softwareupdate --install-rosetta --agree-to-license`).");
++        }
++    }
++
++    /// <summary>
++    /// Checks whether Rosetta 2 is installed by looking for its runtime library.
++    /// </summary>
++    private static bool IsRosettaInstalled() =>
++        File.Exists("/Library/Apple/usr/libexec/oah/libRosettaRuntime");
++
++    /// <summary>
++    /// Tries to install a native ffmpeg via Homebrew. Returns null when brew is unavailable
++    /// or the install fails, so the caller can fall back to the Intel-only direct download.
++    /// </summary>
++    private static async Task<FfmpegBootstrapResult?> TryInstallViaBrewAsync(
++        CancellationToken cancellationToken)
++    {
++        string? brewPath = FindBrew();
++        if (brewPath == null)
++        {
++            Log.Debug("Homebrew not found; skipping brew-based ffmpeg install.");
++            return null;
++        }
++
++        Log.Information("Installing native ffmpeg via Homebrew ({BrewPath}) ...", brewPath);
++        try
++        {
++            using Process process = new();
++            process.StartInfo.FileName = brewPath;
++            process.StartInfo.Arguments = "install ffmpeg";
++            process.StartInfo.RedirectStandardOutput = true;
++            process.StartInfo.RedirectStandardError = true;
++            process.StartInfo.UseShellExecute = false;
++            process.StartInfo.CreateNoWindow = true;
++
++            if (!process.Start())
++            {
++                return null;
++            }
++
++            // brew can take several minutes on first install.
++            using CancellationTokenSource timeoutCts =
++                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
++            timeoutCts.CancelAfter(TimeSpan.FromMinutes(15));
++
++            await process.WaitForExitAsync(timeoutCts.Token);
++            if (process.ExitCode != 0)
++            {
++                string error = await process.StandardError.ReadToEndAsync(cancellationToken);
++                Log.Warning("brew install ffmpeg failed (exit {ExitCode}): {Error}",
++                    process.ExitCode, error.Trim());
++                return null;
++            }
++        }
++        catch (Exception exception) when (exception is not OperationCanceledException)
++        {
++            Log.Warning(exception, "brew install ffmpeg threw; falling back to direct download.");
++            return null;
++        }
++
++        string brewBinDir = Path.GetDirectoryName(brewPath)!;
++        string ffmpegPath = Path.Combine(brewBinDir, "ffmpeg");
++        string ffprobePath = Path.Combine(brewBinDir, "ffprobe");
++        if (!File.Exists(ffmpegPath) || !File.Exists(ffprobePath))
++        {
++            Log.Warning("brew install ffmpeg succeeded but binaries not found in {BrewBinDir}.", brewBinDir);
++            return null;
++        }
++
++        Log.Information("Native ffmpeg installed via Homebrew: {FfmpegPath}", ffmpegPath);
++        return FfmpegBootstrapResult.Succeeded(ffmpegPath, ffprobePath, true);
++    }
++
++    /// <summary>
++    /// Locates the brew executable, checking well-known prefixes first (Finder-launched apps
++    /// get a minimal PATH that often lacks Homebrew) and then the PATH.
++    /// </summary>
++    private static string? FindBrew()
++    {
++        foreach (string candidate in new[]
++                 {
++                     "/opt/homebrew/bin/brew", // Apple Silicon default prefix
++                     "/usr/local/bin/brew", // Intel default prefix
++                 })
++        {
++            if (File.Exists(candidate))
++            {
++                return candidate;
++            }
++        }
++
++        string pathEnv = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
++        foreach (string dir in pathEnv.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
++        {
++            string candidate = Path.Combine(dir, "brew");
++            if (File.Exists(candidate))
++            {
++                return candidate;
++            }
++        }
++
++        return null;
++    }
++
++    private static async Task<bool> CanExecuteToolAsync(string toolPath, CancellationToken cancellationToken)
++    {
++        try
++        {
++            using Process process = new();
++            process.StartInfo.FileName = toolPath;
++            process.StartInfo.Arguments = "-version";
++            process.StartInfo.RedirectStandardOutput = true;
++            process.StartInfo.RedirectStandardError = true;
++            process.StartInfo.UseShellExecute = false;
++            process.StartInfo.CreateNoWindow = true;
++
++            if (!process.Start())
++            {
++                return false;
++            }
++
++            using CancellationTokenSource timeoutCts =
++                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
++            timeoutCts.CancelAfter(TimeSpan.FromSeconds(30));
++
++            await process.WaitForExitAsync(timeoutCts.Token);
++            return process.ExitCode == 0;
++        }
++        catch
++        {
++            return false;
++        }
 +    }
 +
 +    private static bool IsAllowedMacOSDownloadUri(Uri downloadUri) =>
@@ -407,8 +571,9 @@ index 362d795..3a52fc9 100644
 +            }
 +
 +            uint value = BinaryPrimitives.ReadUInt32LittleEndian(magic);
-+            // MH_MAGIC_64 (64-bit Mach-O) or FAT_MAGIC (universal binary).
-+            return value is 0xFEEDFACF or 0xCAFEBABE;
++            // MH_MAGIC_64 (thin 64-bit Mach-O): on-disk bytes CF FA ED FE read as LE = 0xFEEDFACF.
++            // FAT_MAGIC (universal binary): on-disk bytes CA FE BA BE read as LE = 0xBEBAFECA.
++            return value is 0xFEEDFACF or 0xBEBAFECA;
 +        }
 +        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
 +        {
@@ -420,7 +585,7 @@ index 362d795..3a52fc9 100644
      {
          HttpClient client = new(new HttpClientHandler { AllowAutoRedirect = true })
 diff --git a/SubScraper.Core/Services/StartupService.cs b/SubScraper.Core/Services/StartupService.cs
-index f43df70..769d678 100644
+index f43df70..0d302aa 100644
 --- a/SubScraper.Core/Services/StartupService.cs
 +++ b/SubScraper.Core/Services/StartupService.cs
 @@ -72,7 +72,7 @@ public class StartupService(
@@ -443,7 +608,52 @@ index f43df70..769d678 100644
          // Widevine device checks
          result.ClientIdBlobMissing = !File.Exists(Path.Join(WidevineConstants.DEVICES_FOLDER,
              WidevineConstants.DEVICE_NAME, "device_client_id_blob"));
-@@ -505,10 +509,15 @@ public class StartupService(
+@@ -363,6 +367,10 @@ public class StartupService(
+             return null;
+         }
+ 
++        // Binaries bundled via a Windows-made ZIP lose their Unix executable bit.
++        // Restore it so manually bundled tools just work.
++        EnsureUnixExecutable(resolvedToolPath);
++
+         if (!IsToolArchitectureCompatible(resolvedToolPath, toolName))
+         {
+             return null;
+@@ -377,6 +385,33 @@ public class StartupService(
+         return toolVersion;
+     }
+ 
++    /// <summary>
++    /// Restores the Unix executable bit on tool binaries. ZIPs created on Windows do not
++    /// preserve it, so manually bundled ffmpeg/ffprobe would otherwise fail to launch.
++    /// </summary>
++    private static void EnsureUnixExecutable(string toolPath)
++    {
++        if (OperatingSystem.IsWindows())
++        {
++            return;
++        }
++
++        try
++        {
++            UnixFileMode mode = File.GetUnixFileMode(toolPath);
++            if ((mode & UnixFileMode.UserExecute) == 0)
++            {
++                File.SetUnixFileMode(toolPath,
++                    mode | UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute);
++                Log.Debug("Restored executable bit on {ToolPath}", toolPath);
++            }
++        }
++        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
++        {
++            Log.Debug(exception, "Could not set executable bit on {ToolPath}", toolPath);
++        }
++    }
++
+     private static async Task<ToolVersionInfo?> GetToolVersionInfoAsync(string toolPath, string toolName)
+     {
+         try
+@@ -505,10 +540,15 @@ public class StartupService(
          }
  
          string toolName = Path.GetFileNameWithoutExtension(filename);
@@ -570,10 +780,10 @@ index 6f28f62..7e121d1 100644
          {
              Entries.Add(new FaqEntry(
 diff --git a/SubScraper.Tests/Services/FfmpegBootstrapServiceTests.cs b/SubScraper.Tests/Services/FfmpegBootstrapServiceTests.cs
-index eb3c58c..a050386 100644
+index eb3c58c..6852243 100644
 --- a/SubScraper.Tests/Services/FfmpegBootstrapServiceTests.cs
 +++ b/SubScraper.Tests/Services/FfmpegBootstrapServiceTests.cs
-@@ -201,6 +201,92 @@ public class FfmpegBootstrapServiceTests
+@@ -201,6 +201,131 @@ public class FfmpegBootstrapServiceTests
          Assert.Equal(2, requestCount);
      }
  
@@ -644,6 +854,45 @@ index eb3c58c..a050386 100644
 +    }
 +
 +    [Fact]
++    public async Task EnsureInstalledAsync_AcceptsMacOSFatBinary()
++    {
++        using TempFolder temp = new();
++        byte[] ffmpegArchive;
++        using (MemoryStream destination = new())
++        {
++            using (ZipArchive archive = new(destination, ZipArchiveMode.Create, true))
++            {
++                AddEntry(archive, "ffmpeg", CreateMacOSFatBinary());
++            }
++
++            ffmpegArchive = destination.ToArray();
++        }
++
++        byte[] ffprobeArchive = CreateMacOSToolArchive("ffprobe");
++        using HttpClient httpClient = new(new StubHttpMessageHandler(request =>
++        {
++            string url = request.RequestUri?.AbsoluteUri ?? string.Empty;
++            byte[] archive = url.Contains("ffprobe", StringComparison.OrdinalIgnoreCase)
++                ? ffprobeArchive
++                : ffmpegArchive;
++            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(archive) };
++        }));
++        FfmpegBootstrapService service = new(
++            httpClient,
++            temp.Path,
++            Architecture.Arm64,
++            false,
++            1,
++            5 * 1024 * 1024,
++            isMacOS: true);
++
++        FfmpegBootstrapResult result = await service.EnsureInstalledAsync();
++
++        Assert.True(result.Success);
++        Assert.True(File.Exists(result.FfmpegPath));
++    }
++
++    [Fact]
 +    public async Task EnsureInstalledAsync_MacOSWithoutLocalAppDataGuidesToHomebrew()
 +    {
 +        using HttpClient httpClient = new(new StubHttpMessageHandler(_ =>
@@ -666,7 +915,7 @@ index eb3c58c..a050386 100644
      [Fact]
      public void WindowsPeArchitectureHelper_RejectsDifferentNativeMachine()
      {
-@@ -212,6 +298,32 @@ public class FfmpegBootstrapServiceTests
+@@ -212,6 +337,44 @@ public class FfmpegBootstrapServiceTests
          Assert.False(WindowsPeArchitectureHelper.IsCompatible(executablePath, Architecture.Arm64));
      }
  
@@ -696,11 +945,23 @@ index eb3c58c..a050386 100644
 +        return contents;
 +    }
 +
++    private static byte[] CreateMacOSFatBinary()
++    {
++        byte[] contents = new byte[1024 * 1024];
++        // FAT_MAGIC (universal binary): on-disk bytes CA FE BA BE (big-endian).
++        contents[0] = 0xCA;
++        contents[1] = 0xFE;
++        contents[2] = 0xBA;
++        contents[3] = 0xBE;
++
++        return contents;
++    }
++
      private static byte[] CreateArchive(Architecture architecture)
      {
          using MemoryStream destination = new();
 diff --git a/docs/installation/macos.md b/docs/installation/macos.md
-index ea06d58..3d45ffa 100644
+index ea06d58..f8979fb 100644
 --- a/docs/installation/macos.md
 +++ b/docs/installation/macos.md
 @@ -1,8 +1,86 @@
@@ -743,7 +1004,7 @@ index ea06d58..3d45ffa 100644
 +When FFmpeg Path and FFprobe Path are blank, missing, or invalid, SubScraper offers to install FFmpeg automatically.
 +On macOS it downloads the current macOS build from
 +[ffbinaries](https://github.com/ffbinaries/ffbinaries-prebuilt/releases) (version 6.1, Intel 64-bit) and caches it under
-+`~/.local/share/SubScraper/ffmpeg/macos-x64`, reusing it on later runs.
++`~/Library/Application Support/SubScraper/ffmpeg/macos-x64`, reusing it on later runs.
 +
 +!!! note "Apple Silicon"
 +
