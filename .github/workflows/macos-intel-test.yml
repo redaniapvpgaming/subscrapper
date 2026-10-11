@@ -28,17 +28,7 @@ jobs:
       - name: Improve cwd fix for Intel (file-existence check)
         run: |
           cd src
-          python3 << 'PYEOF'           for f in ["SubScraper.Cli/Program.cs", "SubScraper.Gui/Program.cs"]:               lines = open(f).readlines()               out = []               i = 0               replaced = 0               while i < len(lines):                   if 'OperatingSystem.IsMacOS()' in lines[i] and 'GetCurrentDirectory() == "/"' in lines[i]:                       indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]                       new_block = [                           f"{indent}if (OperatingSystem.IsMacOS())
-",                           f"{indent}{{
-",                           f"{indent}    string appDir = AppContext.BaseDirectory;
-",                           f"{indent}    string cwd = Directory.GetCurrentDirectory();
-",                           f'{indent}    if (!File.Exists(Path.Combine(cwd, "config.conf")) &&
-',                           f'{indent}        File.Exists(Path.Combine(appDir, "config.conf")))
-',                           f"{indent}    {{
-",                           f"{indent}        Directory.SetCurrentDirectory(appDir);
-",                           f"{indent}    }}
-",                           f"{indent}}}
-",                       ]                       out.extend(new_block)                       i += 4                       replaced += 1                   else:                       out.append(lines[i])                       i += 1               if replaced > 0:                   open(f, 'w').writelines(out)                   print(f"OK: patched {f} ({replaced} replacement)")               else:                   print(f"WARN: pattern not found in {f}")           PYEOF
+          python3 ../fix-cwd-intel.py
 
       - name: Apply Discord webhook patch
         run: |
