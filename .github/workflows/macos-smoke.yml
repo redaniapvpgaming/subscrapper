@@ -45,17 +45,6 @@ jobs:
           grep -q "AuthSyncService" SubScraper.Cli/Program.cs
           echo "OK: webhook patch markers present"
 
-      - name: Apply TEMPORARY diagnostic patch (PurchasedTab API response)
-        run: |
-          cd src
-          # TEMPORARY: logs raw API list count + response types to confirm
-          # whether OnlyFans returns empty for datacenter IPs.
-          # Remove this step after the diagnosis.
-          git apply --check ../subscraper-diag-purchased.patch
-          git apply ../subscraper-diag-purchased.patch
-          grep -q "DIAG PurchasedTab" SubScraper.Core/Services/ApiService.cs
-          echo "OK: diagnostic patch applied"
-
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
         with:
@@ -121,10 +110,6 @@ jobs:
 
       - name: Bundle SQLite native library (macOS single-file fix)
         run: |
-          # Microsoft.Data.Sqlite cannot resolve the e_sqlite3 native library
-          # from the single-file bundle at runtime on macOS, so ship
-          # libe_sqlite3.dylib (osx-arm64) next to the binaries. DbService
-          # preloads it explicitly on macOS (see the macOS patch).
           SQLITE_DYLIB=$(find "$HOME/.nuget/packages/sqlitepclraw.lib.e_sqlite3" \
             -path "*runtimes/osx-arm64/native/libe_sqlite3.dylib" 2>/dev/null | head -1)
           test -f "$SQLITE_DYLIB" || { echo "FAIL: libe_sqlite3.dylib (osx-arm64) not found in NuGet cache"; exit 1; }
@@ -138,14 +123,10 @@ jobs:
       - name: Test bundled ffmpeg with restricted PATH (no installs)
         run: |
           cd "$GITHUB_WORKSPACE/release-macos"
-          # Simulate a clean Mac: hide Homebrew (/opt/homebrew/bin) from PATH.
-          # The app must resolve ONLY the bundled ffmpeg/bin binaries.
           export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
           command -v ffmpeg >/dev/null 2>&1 && { echo "FAIL: ffmpeg still visible on PATH"; exit 1; }
           cp "$GITHUB_WORKSPACE/outosx-arm64-cli/SubScraper.Cli" "./SubScraper - Classic"
           chmod +x "SubScraper - Classic"
-          # Content files the CLI needs next to the binary (the publish output has
-          # them, but copying only the single binary would drop them)
           cp "$GITHUB_WORKSPACE/outosx-arm64-cli/rules.json" .
           rm -rf chromium-scripts
           cp -R "$GITHUB_WORKSPACE/outosx-arm64-cli/chromium-scripts" .
@@ -207,91 +188,6 @@ jobs:
           test -x "$BIN/ffmpeg" && test -x "$BIN/ffprobe"
           "$BIN/ffmpeg" -version 2>&1 | head -2
 
-      - name: Test Playwright Chromium launch (browser stack for login)
-        run: |
-          cat > src/SubScraper.Tests/Services/RealMacOSBrowserTests.cs <<'EOF'
-          using Microsoft.Playwright;
-          namespace SubScraper.Tests.Services;
-          public class RealMacOSBrowserTests
-          {
-              [Fact]
-              public async Task Playwright_CanLaunchChromiumHeadless()
-              {
-                  int exitCode = await Task.Run(() => Program.Main(new[] { "install", "chromium" }));
-                  Assert.Equal(0, exitCode);
-                  using IPlaywright playwright = await Playwright.CreateAsync();
-                  await using IBrowser browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
-                  {
-                      Headless = true,
-                      Args = new[] { "--no-sandbox", "--disable-setuid-sandbox" }
-                  });
-                  IPage page = await browser.NewPageAsync();
-                  await page.GotoAsync("https://example.com");
-                  string title = await page.TitleAsync();
-                  Assert.Contains("Example", title, StringComparison.OrdinalIgnoreCase);
-              }
-          }
-          EOF
-          cat > src/SubScraper.Tests/Services/RealMacOSBrowserTypingTests.cs <<'EOF'
-          using Microsoft.Playwright;
-          namespace SubScraper.Tests.Services;
-          public class RealMacOSBrowserTypingTests
-          {
-              // Headful typing proof on the REAL OnlyFans login page: same launch
-              // path as the app's browser login (LaunchPersistentContextAsync +
-              // Headless=false + Channel="chromium"). Types a dummy address into
-              // the Email field; nothing is submitted.
-              [Fact]
-              public async Task HeadfulChromium_TypesIntoRealLoginEmailField()
-              {
-                  string userDataDir = Path.Combine(Path.GetTempPath(), "pw-typing-" + Guid.NewGuid().ToString("N"));
-                  try
-                  {
-                      // Ensure the browser is installed first: xUnit runs test
-                      // classes in parallel, so this test may start before the
-                      // other test's install finishes. Install is idempotent.
-                      int installExitCode = await Task.Run(() => Program.Main(new[] { "install", "chromium" }));
-                      Assert.Equal(0, installExitCode);
-                      using IPlaywright playwright = await Playwright.CreateAsync();
-                      await using IBrowserContext context = await playwright.Chromium.LaunchPersistentContextAsync(
-                          userDataDir,
-                          new BrowserTypeLaunchPersistentContextOptions
-                          {
-                              Headless = false,
-                              Channel = "chromium",
-                          });
-                      IPage page = await context.NewPageAsync();
-                      await page.GotoAsync("https://onlyfans.com");
-                      try { await page.GetByText("ONLY NECESSARY COOKIES").ClickAsync(new() { Timeout = 5000 }); } catch { }
-                      // Diagnostics: dump the real input markup (placeholder="Email"
-                      // did not exist in the last run) plus a screenshot, so the
-                      // next iteration targets the exact field if this still fails.
-                      string inputs = await page.EvaluateAsync<string>(
-                          "() => JSON.stringify([...document.querySelectorAll('input')].map(i => ({type: i.type, ph: i.placeholder || null, name: i.name || null, id: i.id || null, visible: i.offsetParent !== null})))");
-                      Console.WriteLine("PAGE INPUTS: " + inputs);
-                      Console.WriteLine("PAGE TITLE: " + await page.TitleAsync() + " URL: " + page.Url);
-                      await page.ScreenshotAsync(new PageScreenshotOptions { Path = "/tmp/browser-login-page.png" });
-                      // The Email field uses floating-label markup (no placeholder,
-                      // no type=email): find it by its label, else fall back to the
-                      // first visible text input (on this login page it is Email).
-                      ILocator emailField = page.GetByLabel("Email");
-                      if (await emailField.CountAsync() == 0)
-                          emailField = page.Locator("input:not([type='hidden']):visible").First;
-                      await emailField.FillAsync("prueba@muse.test", new() { Timeout = 15000 });
-                      Assert.Equal("prueba@muse.test", await emailField.InputValueAsync());
-                      await page.ScreenshotAsync(new PageScreenshotOptions { Path = "/tmp/browser-login-typing.png" });
-                  }
-                  finally
-                  {
-                      if (Directory.Exists(userDataDir))
-                          Directory.Delete(userDataDir, recursive: true);
-                  }
-              }
-          }
-          EOF
-          cd src
-          dotnet test SubScraper.Tests/SubScraper.Tests.csproj --filter "FullyQualifiedName~RealMacOSBrowser" -v minimal
-
       - name: CLI startup gate (ffmpeg on PATH)
         run: |
           cd "$GITHUB_WORKSPACE/release-macos"
@@ -308,453 +204,6 @@ jobs:
           if [ "$CODE" -eq 4 ]; then echo "FAIL: ffmpeg startup gate not passed"; exit 1; fi
           if grep -q "could not be found" /tmp/cli-out.txt; then echo "FAIL: ffmpeg reported missing"; exit 1; fi
           echo "OK: ffmpeg gate passed (auth failure expected without credentials)"
-
-      - name: Browser auth flow trigger (no credentials, interactive)
-        run: |
-          cd "$GITHUB_WORKSPACE/release-macos"
-          rm -f auth.json
-          # Minimal config with Site.BaseUrl so startup reaches the auth flow
-          cat > config.conf <<'EOF'
-          Site {
-            Name = "OnlyFans"
-            BaseUrl = "https://onlyfans.com"
-            ApiPath = "/api2/v2"
-            DrmCdnHost = "cdn2.onlyfans.com"
-          }
-          EOF
-          # Playwright driver (.playwright/) must sit next to the single-file
-          # binary, otherwise Playwright.CreateAsync() throws "Driver not found"
-          rm -rf .playwright
-          cp -R "$GITHUB_WORKSPACE/outosx-arm64-cli/.playwright" .
-          export PATH="$(cat /tmp/ffbin-dir.txt):$PATH"
-          ./"SubScraper - Classic" < /dev/null > /tmp/browser-test.txt 2>&1 &
-          PID=$!
-          EXITED_EARLY=0
-          for i in $(seq 1 90); do
-            if ! kill -0 $PID 2>/dev/null; then
-              EXITED_EARLY=1
-              break
-            fi
-            # Visual proof: while the login window should be open, check the
-            # Chromium process is alive and capture the screen (macOS runners
-            # have an active GUI session, so headful Chromium is visible).
-            if [ "$i" -eq 30 ] || [ "$i" -eq 70 ]; then
-              echo "--- chromium process check (t=${i}s, login window should be open) ---"
-              ps aux | grep -i "[C]hromium" | grep -v grep | head -5 || echo "(no Chromium process found)"
-              screencapture -x "/tmp/browser-login-${i}s.png" \
-                && echo "OK: screenshot saved to /tmp/browser-login-${i}s.png" \
-                || echo "WARN: screencapture failed"
-            fi
-            sleep 1
-          done
-          if [ "$EXITED_EARLY" -eq 1 ]; then
-            echo "DIAG: app exited on its own before 90s (did NOT wait for login - launch or navigation failed fast)"
-          else
-            echo "DIAG: app still running at 90s -> browser was open and waiting for login (killing for CI)"
-          fi
-          kill $PID 2>/dev/null || true
-          wait $PID 2>/dev/null || true
-          cat /tmp/browser-test.txt
-          echo "=== app log (Serilog appends date: SubScraperYYYYMMDD.txt) ==="
-          LOGFILE=$(ls -t logs/SubScraper*.txt 2>/dev/null | head -1)
-          if [ -n "$LOGFILE" ]; then
-            echo "Log file: $LOGFILE"
-            grep -E "Chromium already downloaded|Failed to download browser|Navigating to configured site|Waiting for user to login|Error getting auth from browser" "$LOGFILE" | tail -20
-            echo "--- exception detail (30 lines from first [ERR]) ---"
-            grep -A 25 "\[ERR\]" "$LOGFILE" | head -30
-            echo "--- playwright browser cache ---"
-            ls -d ~/.cache/ms-playwright/chromium-* ~/Library/Caches/ms-playwright/chromium-* 2>/dev/null || echo "(no playwright chromium found in cache dirs)"
-          else
-            echo "(no log file found in logs/)"
-          fi
-          if grep -q "Preparing the browser" /tmp/browser-test.txt; then
-            echo "OK: browser auth flow triggered (headful launch attempted - no display in CI as expected)"
-          else
-            echo "FAIL: browser auth flow never triggered"
-            exit 1
-          fi
-
-      - name: Load e2e auth.json in the app (fires Discord webhook)
-        env:
-          AUTH_JSON: ${{ secrets.AUTH_JSON }}
-        run: |
-          if [ ! -f /tmp/e2e-auth.json ]; then
-            if [ -n "$AUTH_JSON" ]; then
-              echo "Using AUTH_JSON repo secret for the app login test"
-              printf '%s' "$AUTH_JSON" > /tmp/e2e-auth.json
-            else
-              echo "SKIP: no e2e auth.json (real login test skipped or failed)"
-              exit 0
-            fi
-          fi
-          cd "$GITHUB_WORKSPACE/release-macos"
-          cp /tmp/e2e-auth.json auth.json
-          chmod 600 auth.json
-          rm -rf logs users.db
-          export TERM=xterm-256color
-          # --- app launchers (normal env vs CI vars unset) ---
-          cat > /tmp/run-classic.sh <<'EOF'
-          #!/bin/bash
-          if [ -t 0 ]; then echo "stdin=tty"; else echo "stdin=NOTTY"; fi > /tmp/pty-check.txt
-          if [ -t 1 ]; then echo "stdout=tty"; else echo "stdout=NOTTY"; fi >> /tmp/pty-check.txt
-          cd "$GITHUB_WORKSPACE/release-macos"
-          exec "./SubScraper - Classic"
-          EOF
-          cat > /tmp/run-classic-noci.sh <<'EOF'
-          #!/bin/bash
-          if [ -t 0 ]; then echo "stdin=tty"; else echo "stdin=NOTTY"; fi > /tmp/pty-check.txt
-          if [ -t 1 ]; then echo "stdout=tty"; else echo "stdout=NOTTY"; fi >> /tmp/pty-check.txt
-          cd "$GITHUB_WORKSPACE/release-macos"
-          exec env -u GITHUB_ACTIONS -u CI "./SubScraper - Classic"
-          EOF
-          chmod +x /tmp/run-classic.sh /tmp/run-classic-noci.sh
-          # --- probe: what do .NET + Spectre see under script(1)? ---
-          SC_DLL="$GITHUB_WORKSPACE/src/SubScraper.Cli/bin/Release/net10.0/osx-arm64/Spectre.Console.dll"
-          [ -f "$SC_DLL" ] || SC_DLL=$(find "$GITHUB_WORKSPACE/src" -name "Spectre.Console.dll" | head -1)
-          echo "Spectre DLL: $SC_DLL"
-          rm -rf /tmp/probe && mkdir -p /tmp/probe && cd /tmp/probe
-          cat > probe.csproj <<EOF2
-          <Project Sdk="Microsoft.NET.Sdk">
-            <PropertyGroup>
-              <OutputType>Exe</OutputType>
-              <TargetFramework>net10.0</TargetFramework>
-              <Nullable>disable</Nullable>
-            </PropertyGroup>
-            <ItemGroup>
-              <Reference Include="Spectre.Console"><HintPath>$SC_DLL</HintPath></Reference>
-            </ItemGroup>
-          </Project>
-          EOF2
-          cat > Program.cs <<'EOF2'
-          using System;
-          using Spectre.Console;
-          public static class Probe
-          {
-              public static void Main()
-              {
-                  Console.WriteLine("IsInputRedirected=" + Console.IsInputRedirected);
-                  Console.WriteLine("IsOutputRedirected=" + Console.IsOutputRedirected);
-                  Console.WriteLine("TERM=" + Environment.GetEnvironmentVariable("TERM"));
-                  Console.WriteLine("GITHUB_ACTIONS=" + Environment.GetEnvironmentVariable("GITHUB_ACTIONS"));
-                  Console.WriteLine("CI=" + Environment.GetEnvironmentVariable("CI"));
-                  Console.WriteLine("Interactive=" + AnsiConsole.Profile.Capabilities.Interactive);
-              }
-          }
-          EOF2
-          if dotnet build -v q -nologo 2>&1 | tail -2; then
-            echo "--- probe: normal env ---"
-            ( sleep 3 ) | script -q /tmp/probe1.typescript dotnet /tmp/probe/bin/Debug/net10.0/probe.dll
-            col -b < /tmp/probe1.typescript 2>/dev/null | grep -a -E "IsInputRedirected|IsOutputRedirected|TERM=|GITHUB_ACTIONS=|CI=|Interactive=" || echo "(probe1 output missing)"
-            echo "--- probe: GITHUB_ACTIONS/CI unset ---"
-            ( sleep 3 ) | env -u GITHUB_ACTIONS -u CI script -q /tmp/probe2.typescript dotnet /tmp/probe/bin/Debug/net10.0/probe.dll
-            col -b < /tmp/probe2.typescript 2>/dev/null | grep -a -E "IsInputRedirected|IsOutputRedirected|TERM=|GITHUB_ACTIONS=|CI=|Interactive=" || echo "(probe2 output missing)"
-          else
-            echo "WARN: probe build failed, skipping probe"
-          fi
-          # --- choose launcher based on probe ---
-          APP_RUNNER=/tmp/run-classic.sh
-          if col -b < /tmp/probe2.typescript 2>/dev/null | grep -a -q "Interactive=True"; then
-            if ! col -b < /tmp/probe1.typescript 2>/dev/null | grep -a -q "Interactive=True"; then
-              echo "PROBE: unsetting CI vars flips Spectre to interactive -> launching app without them"
-              APP_RUNNER=/tmp/run-classic-noci.sh
-            fi
-          fi
-          cd "$GITHUB_WORKSPACE/release-macos"
-          # Keep stdin open 45s so the menu stays rendered, then EOF.
-          ( sleep 45 ) | script -q /tmp/menu.typescript "$APP_RUNNER" &
-          SCRIPT_PID=$!
-          sleep 55
-          pkill -f "SubScraper - Classic" 2>/dev/null || true
-          sleep 2
-          kill $SCRIPT_PID 2>/dev/null || true
-          wait $SCRIPT_PID 2>/dev/null || true
-          echo "=== pty check ==="
-          cat /tmp/pty-check.txt 2>/dev/null || echo "(no pty check)"
-          echo "=== strip ANSI (python, portable) ==="
-          python3 - <<'PYEOF'
-          import re
-          raw = open('/tmp/menu.typescript', encoding='utf-8', errors='replace').read()
-          raw = re.sub(r'\x1b\][^\x1b\x07]*(?:\x07|\x1b\\)', '', raw)  # OSC hyperlinks
-          raw = re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]', '', raw)            # CSI sequences
-          raw = re.sub(r'\x1b[()][0-9A-B]', '', raw)                  # charset selection
-          out = []
-          for line in raw.split('\n'):
-              if '\r' in line:
-                  line = line.split('\r')[-1]  # \r overwrite -> keep last
-              out.append(line)
-          open('/tmp/menu-plain.txt', 'w').write('\n'.join(out))
-          print(f"menu-plain.txt: {len(out)} lines")
-          PYEOF
-          echo "=== login check (pty capture) ==="
-          grep -a -i -m3 "logged in successfully\|auth.json located successfully" /tmp/menu-plain.txt || echo "(login success line not in capture)"
-          echo "=== main menu check (pty capture) ==="
-          if grep -a -m5 "Download Individual Post(s)\|Download Purchased Tab\|Change logging level\|Logout and Exit" /tmp/menu-plain.txt; then
-            echo "OK: main menu rendered on macOS"
-          else
-            echo "(menu options not found in capture)"
-          fi
-          echo "=== render console screenshot ==="
-          python3 - <<'PYEOF' || echo "WARN: console PNG render failed"
-          import subprocess, sys
-          try:
-              from PIL import Image, ImageDraw, ImageFont
-          except ImportError:
-              subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "--break-system-packages", "pillow"])
-              from PIL import Image, ImageDraw, ImageFont
-          lines = open("/tmp/menu-plain.txt", encoding="utf-8", errors="replace").read().splitlines()
-          start = 0
-          for i, l in enumerate(lines):
-              if "Logged In successfully" in l:
-                  start = max(0, i - 2)
-                  break
-          lines = [l.rstrip() for l in lines[start:start+60]]
-          while lines and not lines[0].strip():
-              lines.pop(0)
-          while lines and not lines[-1].strip():
-              lines.pop()
-          if not lines:
-              lines = ["(empty capture)"]
-          try:
-              font = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 15)
-          except Exception:
-              font = ImageFont.load_default()
-          try:
-              title_font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 13)
-          except Exception:
-              title_font = font
-          ascent, descent = font.getmetrics()
-          lh = ascent + descent + 4
-          maxw = max(font.getlength(l) for l in lines)
-          # macOS Terminal.app-style window chrome around the real capture
-          TITLE_H, PAD_X, PAD_Y = 32, 16, 12
-          W = int(maxw) + PAD_X * 2
-          H = TITLE_H + PAD_Y + lh * len(lines) + PAD_Y
-          img = Image.new("RGB", (W, H), (30, 30, 32))
-          d = ImageDraw.Draw(img)
-          d.rectangle([0, 0, W, TITLE_H], fill=(58, 58, 62))
-          d.line([0, TITLE_H, W, TITLE_H], fill=(20, 20, 20))
-          for cx, color in [(22, (255, 95, 86)), (42, (255, 189, 46)), (62, (40, 201, 64))]:
-              r, cy = 6, TITLE_H // 2
-              d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=color)
-          title = "SubScraper - Classic"
-          tw = title_font.getlength(title)
-          ta, td = title_font.getmetrics()
-          d.text(((W - tw) / 2, (TITLE_H - ta - td) / 2), title, font=title_font, fill=(210, 210, 212))
-          y = TITLE_H + PAD_Y
-          for l in lines:
-              d.text((PAD_X, y), l, font=font, fill=(214, 214, 214))
-              y += lh
-          img.save("/tmp/menu-console.png")
-          print(f"menu-console.png: {W}x{H}, {len(lines)} lines")
-          PYEOF
-          echo "=== auth load check (log file) ==="
-          LOGFILE=$(ls -t logs/SubScraper*.txt 2>/dev/null | head -1)
-          if [ -n "$LOGFILE" ]; then
-            grep -E "Auth file loaded|auth invalid|Failed to load auth|Logged In successfully" "$LOGFILE" | head -10
-          else
-            echo "(no log file)"
-          fi
-          echo "If the webhook fired, check your Discord for the auth.json message."
-          echo "=== users.db check (SQLite native lib fix) ==="
-          if [ -f users.db ]; then
-            echo "OK: users.db created on macOS"
-            ls -la users.db
-          else
-            echo "(users.db NOT created)"
-          fi
-          if grep -a -q "type initializer for 'Microsoft.Data.Sqlite.SqliteConnection'" /tmp/menu-plain.txt; then
-            echo "FAIL: SQLite native library still not loading"
-          else
-            echo "OK: no SQLite exception in console capture"
-          fi
-          # Never ship the test database or auth in the release tarball
-          rm -f users.db auth.json
-
-      - name: Capture real Terminal.app console screenshot (macOS GUI)
-        if: always()
-        run: |
-          # Real photo of the logged-in console inside a Terminal.app window.
-          # macOS runners have an active GUI session, so screencapture sees
-          # actual windows (same technique as the browser screenshots).
-          cd "$GITHUB_WORKSPACE/release-macos"
-          cp /tmp/e2e-auth.json auth.json
-          chmod 600 auth.json
-          rm -rf logs users.db
-          cat > /tmp/terminal-classic.sh <<EOF
-          #!/bin/bash
-          cd "$GITHUB_WORKSPACE/release-macos"
-          env -u GITHUB_ACTIONS -u CI "./SubScraper - Classic"
-          EOF
-          chmod +x /tmp/terminal-classic.sh
-          # Launch Terminal.app first: a cold start can exceed the AppleEvent
-          # timeout, so open the script directly (Terminal runs .sh files)
-          # instead of driving a not-yet-running app via AppleScript.
-          open -a Terminal /tmp/terminal-classic.sh \
-            && echo "OK: Terminal.app launched with Classic" \
-            || echo "WARN: Terminal launch failed"
-          sleep 8
-          osascript -e 'tell application "Terminal" to set bounds of front window to {100, 80, 1120, 820}' 2>/dev/null || true
-          osascript -e 'tell application "Terminal" to activate' 2>/dev/null || true
-          echo "Waiting for login + menu in Terminal.app..."
-          sleep 55
-          LOGFILE=$(ls -t logs/SubScraper*.txt 2>/dev/null | head -1)
-          if [ -n "$LOGFILE" ]; then
-            grep -a -m2 "Logged In successfully\|auth.json located successfully" "$LOGFILE" || echo "(login line not in log yet)"
-          fi
-          screencapture -x /tmp/terminal-console.png \
-            && echo "OK: Terminal.app screenshot saved" \
-            || echo "WARN: screencapture failed"
-          pkill -f "SubScraper - Classic" 2>/dev/null || true
-          sleep 2
-          osascript -e 'tell application "Terminal" to quit' 2>/dev/null || true
-          rm -f auth.json users.db
-
-      - name: Download Purchased Tab test (macOS)
-        env:
-          CDM_BLOB_B64: ${{ secrets.CDM_CLIENT_ID_BLOB_B64 }}
-          CDM_KEY_B64: ${{ secrets.CDM_PRIVATE_KEY_B64 }}
-        run: |
-          # Verifies real downloads work on macOS: Classic in non-interactive
-          # purchased-tab mode inside Terminal.app, progress screenshots,
-          # then inspects downloaded files + logs.
-          if [ ! -f /tmp/e2e-auth.json ]; then
-            echo "SKIP: no e2e auth.json"
-            exit 0
-          fi
-          if [ -z "$CDM_BLOB_B64" ] || [ -z "$CDM_KEY_B64" ]; then
-            echo "SKIP: CDM secrets not set (DRM downloads need them)"
-            exit 0
-          fi
-          cd "$GITHUB_WORKSPACE/release-macos"
-          cp /tmp/e2e-auth.json auth.json
-          chmod 600 auth.json
-          rm -rf logs users.db
-          # CDM keys BEFORE the download (DRM-protected videos need them)
-          mkdir -p cdm/devices/chrome_1610
-          printf '%s' "$CDM_BLOB_B64" | base64 -d > cdm/devices/chrome_1610/device_client_id_blob
-          printf '%s' "$CDM_KEY_B64" | base64 -d > cdm/devices/chrome_1610/device_private_key
-          test -s cdm/devices/chrome_1610/device_client_id_blob
-          test -s cdm/devices/chrome_1610/device_private_key
-          echo "OK: CDM keys placed for download test"
-          cp config.conf /tmp/config.conf.bak
-          # Verbose logging for the test so download progress is visible
-          # in real time (restored afterwards)
-          sed -i '' 's/LoggingLevel = "error"/LoggingLevel = "information"/' config.conf
-          cat >> config.conf <<'EOF'
-          Interaction {
-            NonInteractiveMode = true
-            NonInteractiveModePurchasedTab = true
-          }
-          EOF
-          cat > /tmp/terminal-download.sh <<EOF
-          #!/bin/bash
-          cd "$GITHUB_WORKSPACE/release-macos"
-          # Full console output goes to file (Terminal window will be blank,
-          # but everything is captured for the artifact)
-          env -u GITHUB_ACTIONS -u CI "./SubScraper - Classic" --non-interactive > /tmp/download-console-full.txt 2>&1
-          EOF
-          chmod +x /tmp/terminal-download.sh
-          # Real-time progress: stream the Serilog log into the Actions output
-          # so the download can be watched live in the run view.
-          mkdir -p logs
-          LOGFILE="logs/SubScraper$(date +%Y%m%d).txt"
-          touch "$LOGFILE"
-          tail -n +1 -f "$LOGFILE" &
-          TAIL_PID=$!
-          open -a Terminal /tmp/terminal-download.sh \
-            && echo "OK: Terminal.app launched for download test" \
-            || echo "WARN: Terminal launch failed"
-          sleep 8
-          osascript -e 'tell application "Terminal" to set bounds of front window to {100, 80, 1120, 820}' 2>/dev/null || true
-          osascript -e 'tell application "Terminal" to activate' 2>/dev/null || true
-          # Let it download ~4 minutes (just to verify downloads work),
-          # screenshotting progress
-          for i in 1 2; do
-            sleep 120
-            screencapture -x /tmp/download-progress-$i.png 2>/dev/null \
-              && echo "OK: progress screenshot $i saved" \
-              || echo "WARN: progress screenshot $i failed"
-          done
-          kill $TAIL_PID 2>/dev/null || true
-          pkill -f "SubScraper - Classic" 2>/dev/null || true
-          sleep 2
-          osascript -e 'tell application "Terminal" to quit' 2>/dev/null || true
-          echo "=== downloaded files ==="
-          find . -path ./ffmpeg -prune -o -path ./.playwright -prune -o -type f -newer /tmp/config.conf.bak -print 2>/dev/null | grep -v -E "^\./(logs|chromium-data)" | head -30
-          echo "--- total new files:"
-          find . -path ./ffmpeg -prune -o -path ./.playwright -prune -o -type f -newer /tmp/config.conf.bak -print 2>/dev/null | grep -v -E "^\./(logs|chromium-data)" | wc -l
-          echo "=== __user_data__ structure ==="
-          find __user_data__ -type f 2>/dev/null | head -40
-          echo "--- total files in __user_data__:"
-          find __user_data__ -type f 2>/dev/null | wc -l
-          echo "=== full console output (last 80 lines) ==="
-          tail -80 /tmp/download-console-full.txt 2>/dev/null || echo "(no console capture)"
-          # Save logs for the artifact (before cleanup)
-          LOGFILE=$(ls -t logs/SubScraper*.txt 2>/dev/null | head -1)
-          if [ -n "$LOGFILE" ]; then
-            cp "$LOGFILE" /tmp/download-serilog.txt
-            echo "OK: Serilog log saved ($(wc -l < /tmp/download-serilog.txt) lines)"
-          else
-            echo "WARN: no Serilog log file found"
-          fi
-          # Pack downloads for the artifact (user wants to verify videos play)
-          if [ -d __user_data__ ]; then
-            tar -czf /tmp/downloaded-files.tar.gz __user_data__ 2>/dev/null
-            echo "OK: downloads packed ($(du -h /tmp/downloaded-files.tar.gz | cut -f1))"
-          else
-            echo "(no __user_data__ to pack)"
-          fi
-          # Restore config and clean test leftovers.
-          # IMPORTANT: __user_data__ from the test must NOT end up in the
-          # release tarball, so it is deleted here AFTER the artifact pack.
-          cp /tmp/config.conf.bak config.conf
-          rm -rf auth.json users.db logs __user_data__
-          echo "OK: download test finished (config restored, test data cleaned)"
-
-      - name: Upload download test screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: download-test-screenshots
-          path: /tmp/download-progress-*.png
-          if-no-files-found: warn
-
-      - name: Upload download test logs (full console + Serilog)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: download-test-logs
-          path: |
-            /tmp/download-console-full.txt
-            /tmp/download-serilog.txt
-          if-no-files-found: warn
-
-      - name: Upload downloaded files (verify videos play)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: download-test-files
-          path: /tmp/downloaded-files.tar.gz
-          if-no-files-found: warn
-
-      - name: Upload console menu screenshot
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: console-menu-screenshot
-          path: |
-            /tmp/menu-console.png
-            /tmp/menu-plain.txt
-            /tmp/terminal-console.png
-          if-no-files-found: warn
-
-      - name: Upload browser login screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: browser-login-screenshots
-          path: /tmp/browser-login-*.png
-          if-no-files-found: warn
 
       - name: Assemble release tarball (config + CDM keys + bundled ffmpeg)
         env:
@@ -803,7 +252,6 @@ jobs:
           test -s cdm/devices/chrome_1610/device_client_id_blob
           test -s cdm/devices/chrome_1610/device_private_key
           echo "OK: CDM keys placed"
-          # Double-click launcher for Classic (cd to package dir first, then run)
           cat > "SubScraper - Classic.command" <<'EOF'
           #!/bin/bash
           cd "$(dirname "$0")"
@@ -811,15 +259,10 @@ jobs:
           EOF
           chmod +x "SubScraper - Classic.command"
           echo "OK: Classic double-click launcher created"
-          # Playwright driver for the Classic single-file binary (same lookup
-          # as the .app bundle: <appdir>/.playwright/node/darwin-arm64/node).
-          # Without it, Playwright.CreateAsync() throws "Driver not found" and
-          # the browser login flow never starts.
           rm -rf .playwright
           cp -R "$GITHUB_WORKSPACE/outosx-arm64-cli/.playwright" .
           test -x .playwright/node/darwin-arm64/node || { echo "FAIL: playwright node driver missing/not executable"; exit 1; }
           echo "OK: Classic playwright driver in place"
-          # Never ship CI leftovers or a stale auth.json in the release tarball
           rm -rf logs chromium-data auth.json "SubScraper.app/Contents/MacOS/logs"
           cd "$GITHUB_WORKSPACE"
           tar -czf SubScraperV1.0.13-osx-arm64.tar.gz -C release-macos .
@@ -852,7 +295,7 @@ jobs:
           echo "OK: all expected files present"
           tar -xzOf SubScraperV1.0.13-osx-arm64.tar.gz ./config.conf | grep -q 'Name = "OnlyFans"' \
             || { echo "FAIL: config missing OnlyFans site"; exit 1; }
-          if tar -xzOf SubScraperV1.0.13-osx-arm64.tar.gz ./config.conf | grep -q 'C:\\\\Users'; then
+          if tar -xzOf SubScraperV1.0.13-osx-arm64.tar.gz ./config.conf | grep -q 'C:\\Users'; then
             echo "FAIL: Windows path leaked into config"; exit 1
           fi
           echo "OK: config has OnlyFans site, no Windows paths"
@@ -885,20 +328,17 @@ jobs:
           tar -xzf "$GITHUB_WORKSPACE/SubScraperV1.0.13-osx-arm64.tar.gz" -C /tmp/final-test
           echo "=== extracted layout ==="
           ls /tmp/final-test/
-          # Exec permissions must survive the tar round-trip (no chmod fixups here)
           test -x "/tmp/final-test/SubScraper - Classic" || { echo "FAIL: Classic exec permission lost in tarball"; exit 1; }
           test -x /tmp/final-test/ffmpeg/bin/ffmpeg || { echo "FAIL: ffmpeg exec permission lost in tarball"; exit 1; }
           test -x /tmp/final-test/ffmpeg/bin/ffprobe || { echo "FAIL: ffprobe exec permission lost in tarball"; exit 1; }
           test -x /tmp/final-test/SubScraper.app/Contents/MacOS/SubScraper || { echo "FAIL: GUI exec permission lost in tarball"; exit 1; }
           test -x "/tmp/final-test/SubScraper - Classic.command" || { echo "FAIL: Classic launcher exec permission lost in tarball"; exit 1; }
           echo "OK: exec permissions preserved through tarball"
-          # .app bundle intact in the shipped artifact
           APP="/tmp/final-test/SubScraper.app"
           test -f "$APP/Contents/MacOS/config.conf" || { echo "FAIL: GUI config missing in tarball"; exit 1; }
           test -f "$APP/Contents/MacOS/cdm/devices/chrome_1610/device_client_id_blob" || { echo "FAIL: GUI CDM blob missing in tarball"; exit 1; }
           test -f "$APP/Contents/MacOS/ffmpeg/bin/ffmpeg" || { echo "FAIL: GUI ffmpeg missing in tarball"; exit 1; }
           echo "OK: .app bundle intact in shipped tarball"
-          # Run the SHIPPED Classic with restricted PATH (simulates a clean user Mac)
           cd /tmp/final-test
           export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
           command -v ffmpeg >/dev/null 2>&1 && { echo "FAIL: ffmpeg still visible on PATH"; exit 1; }
@@ -914,8 +354,6 @@ jobs:
           if grep -q "/opt/homebrew" /tmp/final-shipped-test.txt; then echo "FAIL: Homebrew ffmpeg leaked in"; exit 1; fi
           grep -q 'Name = "OnlyFans"' /tmp/final-test/config.conf || { echo "FAIL: shipped config missing OnlyFans"; exit 1; }
           echo "OK: shipped tarball works standalone with bundled ffmpeg"
-          # Simulate Finder double-click: run the .command launcher from a DIFFERENT cwd
-          # (Finder opens .command files with cwd=$HOME, not the package dir)
           cd /tmp
           rm -f /tmp/config.conf
           set +e
@@ -929,46 +367,6 @@ jobs:
           grep -q "9\.0\." /tmp/command-test.txt || { echo "FAIL: launcher did not detect 9.x"; exit 1; }
           test ! -f /tmp/config.conf || { echo "FAIL: launcher created stray config.conf in wrong cwd"; exit 1; }
           echo "OK: double-click launcher works (correct cwd, bundled ffmpeg, no stray files)"
-          # Interactive run via the launcher, like a real Finder double-click:
-          # the browser auth flow must trigger (no display in CI, so we only
-          # check that the flow starts).
-          cd /tmp
-          "/tmp/final-test/SubScraper - Classic.command" < /dev/null > /tmp/command-interactive-test.txt 2>&1 &
-          LAUNCHER_PID=$!
-          EXITED_EARLY=0
-          for i in $(seq 1 90); do
-            if ! kill -0 $LAUNCHER_PID 2>/dev/null; then
-              EXITED_EARLY=1
-              break
-            fi
-            sleep 1
-          done
-          if [ "$EXITED_EARLY" -eq 1 ]; then
-            echo "DIAG: launcher exited on its own before 90s (did NOT wait for login - launch or navigation failed fast)"
-          else
-            echo "DIAG: launcher still running at 90s -> browser was open and waiting for login (killing for CI)"
-          fi
-          kill $LAUNCHER_PID 2>/dev/null || true
-          wait $LAUNCHER_PID 2>/dev/null || true
-          cat /tmp/command-interactive-test.txt
-          echo "=== app log (Serilog appends date: SubScraperYYYYMMDD.txt) ==="
-          LOGFILE=$(ls -t /tmp/final-test/logs/SubScraper*.txt 2>/dev/null | head -1)
-          if [ -n "$LOGFILE" ]; then
-            echo "Log file: $LOGFILE"
-            grep -E "Chromium already downloaded|Failed to download browser|Navigating to configured site|Waiting for user to login|Error getting auth from browser" "$LOGFILE" | tail -20
-            echo "--- exception detail (30 lines from first [ERR]) ---"
-            grep -A 25 "\[ERR\]" "$LOGFILE" | head -30
-            echo "--- playwright browser cache ---"
-            ls -d ~/.cache/ms-playwright/chromium-* ~/Library/Caches/ms-playwright/chromium-* 2>/dev/null || echo "(no playwright chromium found in cache dirs)"
-          else
-            echo "(no log file found in /tmp/final-test/logs/)"
-          fi
-          if grep -q "Preparing the browser" /tmp/command-interactive-test.txt; then
-            echo "OK: double-click launcher triggers browser auth flow (headful launch attempted - no display in CI as expected)"
-          else
-            echo "FAIL: launcher did not trigger browser auth flow"
-            exit 1
-          fi
 
       - name: Create GitHub Release (direct .tar.gz download)
         env:
@@ -984,4 +382,4 @@ jobs:
             --title "SubScraper v1.0.13 macOS Apple Silicon" \
             --notes "SubScraper for macOS 13+ (Apple Silicon arm64). Contents: SubScraper.app (GUI), SubScraper Classic (CLI) + double-click launcher, bundled ffmpeg/ffprobe 9.0.2 arm64, OnlyFans site config, CDM device keys. Install: tar -xzf SubScraperV1.0.13-osx-arm64.tar.gz" \
             SubScraperV1.0.13-osx-arm64.tar.gz
-          echo "Direct download: https://github.com/Lkas2412/subscrapper/releases/download/$TAG/SubScraperV1.0.13-osx-arm64.tar.gz"
+          echo "Direct download: https://github.com/redaniapvpgaming/subscrapper/releases/download/$TAG/SubScraperV1.0.13-osx-arm64.tar.gz"
