@@ -24,6 +24,11 @@ jobs:
           git apply --check --exclude='docs/*' ../subscraper-macos.patch
           git apply --exclude='docs/*' ../subscraper-macos.patch
 
+      - name: Improve cwd fix (unconditional anchor)
+        run: |
+          cd src
+          python3 ../fix-cwd-intel.py
+
       - name: Verify macOS patch applied
         run: |
           cd src
