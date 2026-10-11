@@ -25,6 +25,36 @@ jobs:
           git apply --exclude='docs/*' ../subscraper-macos.patch
           echo "OK: macOS patch applied"
 
+      - name: Improve cwd fix for Intel (file-existence check)
+        run: |
+          cd src
+          python3 << 'PYEOF'
+          import re
+          old_pattern = re.compile(
+              r'if \(OperatingSystem\.IsMacOS\(\) && Directory\.GetCurrentDirectory\(\) == "/"\)\s*\{\s*'
+              r'Directory\.SetCurrentDirectory\(AppContext\.BaseDirectory\);\s*\}',
+              re.MULTILINE
+          )
+          new_code = '''if (OperatingSystem.IsMacOS())
+                  {
+                      string appDir = AppContext.BaseDirectory;
+                      string cwd = Directory.GetCurrentDirectory();
+                      if (!File.Exists(Path.Combine(cwd, "config.conf")) &&
+                          File.Exists(Path.Combine(appDir, "config.conf")))
+                      {
+                          Directory.SetCurrentDirectory(appDir);
+                      }
+                  }'''
+          for f in ["SubScraper.Cli/Program.cs", "SubScraper.Gui/Program.cs"]:
+              s = open(f).read()
+              s2, n = old_pattern.subn(new_code, s)
+              if n == 0:
+                  print(f"WARN: pattern not found in {f}, skipping")
+              else:
+                  open(f, 'w').write(s2)
+                  print(f"OK: patched {f} ({n} replacement)")
+          PYEOF
+
       - name: Apply Discord webhook patch
         run: |
           cd src
