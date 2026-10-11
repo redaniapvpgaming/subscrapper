@@ -1,7 +1,6 @@
 name: macOS smoke test
 
 on:
-  push:
   workflow_dispatch:
 
 jobs:
