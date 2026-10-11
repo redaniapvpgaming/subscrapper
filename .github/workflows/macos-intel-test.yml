@@ -172,11 +172,15 @@ jobs:
           cd "$GITHUB_WORKSPACE/intel-test"
           echo "=== launching Intel Classic (20s timeout) ==="
           set +e
-          timeout 20 ./"SubScraper - Classic" < /dev/null > /tmp/intel-smoke.txt 2>&1
+          ./"SubScraper - Classic" < /dev/null > /tmp/intel-smoke.txt 2>&1 &
+          APP_PID=$!
+          sleep 20
+          kill $APP_PID 2>/dev/null
+          wait $APP_PID 2>/dev/null
           CODE=$?
           set -e
           cat /tmp/intel-smoke.txt
-          echo "exit=$CODE (124 = still running at timeout, expected)"
+          echo "exit=$CODE (143 = killed after 20s timeout, expected)"
           grep -q "config.conf located successfully" /tmp/intel-smoke.txt || { echo "FAIL: config.conf not loaded"; exit 1; }
           if grep -q "Site.BaseUrl must be configured" /tmp/intel-smoke.txt; then echo "FAIL: skeleton config detected, not the full one"; exit 1; fi
           grep -q "FFmpeg located successfully" /tmp/intel-smoke.txt || { echo "FAIL: ffmpeg not detected"; exit 1; }
