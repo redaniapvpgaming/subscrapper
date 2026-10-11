@@ -18,11 +18,10 @@ Exit 0 when every target was upgraded (or already upgraded), 1 otherwise so
 the workflow fails loudly instead of shipping a build without the fix.
 """
 
+import re
 import sys
 
 TARGETS = ["SubScraper.Cli/Program.cs", "SubScraper.Gui/Program.cs"]
-MARKER_A = "OperatingSystem.IsMacOS()"
-MARKER_B = 'GetCurrentDirectory() == "/"'
 ALREADY_DONE = 'File.Exists(Path.Combine(appDir, "config.conf"))'
 
 NEW_BLOCK = """{indent}if (OperatingSystem.IsMacOS())
@@ -37,31 +36,39 @@ NEW_BLOCK = """{indent}if (OperatingSystem.IsMacOS())
 {indent}}}
 """
 
+# Flexible regex for the old 4-line block (tolerates whitespace variations)
+OLD_PATTERN = re.compile(
+    r'[ \t]*if\s*\(\s*OperatingSystem\.IsMacOS\(\)\s*&&\s*'
+    r'Directory\.GetCurrentDirectory\(\)\s*==\s*"/"\s*\)\s*\n'
+    r'[ \t]*\{\s*\n'
+    r'[ \t]*Directory\.SetCurrentDirectory\(AppContext\.BaseDirectory\);\s*\n'
+    r'[ \t]*\}\s*\n?',
+    re.MULTILINE
+)
+
 
 def upgrade(path):
     with open(path, encoding="utf-8") as f:
-        lines = f.readlines()
-    if any(ALREADY_DONE in line for line in lines):
+        content = f.read()
+    if ALREADY_DONE in content:
         print(f"SKIP: {path} already has the improved cwd fix")
         return 0
-    out = []
-    i = 0
-    replaced = 0
-    while i < len(lines):
-        if MARKER_A in lines[i] and MARKER_B in lines[i]:
-            indent = lines[i][: len(lines[i]) - len(lines[i].lstrip())]
-            out.append(NEW_BLOCK.format(indent=indent))
-            i += 4  # skip the simple 4-line block: if / { / SetCurrentDirectory / }
-            replaced += 1
-        else:
-            out.append(lines[i])
-            i += 1
-    if not replaced:
+
+    def repl(m):
+        first_line = m.group(0).split('\n')[0]
+        indent = first_line[:len(first_line) - len(first_line.lstrip())]
+        return NEW_BLOCK.format(indent=indent)
+
+    new_content, n = OLD_PATTERN.subn(repl, content)
+    if n == 0:
         print(f"WARN: pattern not found in {path} (patch may have changed)")
+        for i, line in enumerate(content.split('\n'), 1):
+            if 'GetCurrentDirectory' in line or 'SetCurrentDirectory' in line:
+                print(f"  DEBUG line {i}: {line.strip()}")
         return 1
     with open(path, "w", encoding="utf-8") as f:
-        f.writelines(out)
-    print(f"OK: {path} upgraded ({replaced} block)")
+        f.write(new_content)
+    print(f"OK: {path} upgraded ({n} block)")
     return 0
 
 
