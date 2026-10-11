@@ -25,6 +25,19 @@ jobs:
           git apply --exclude='docs/*' ../subscraper-macos.patch
           echo "OK: macOS patch applied"
 
+      - name: Apply Discord webhook patch
+        run: |
+          cd src
+          git apply --check ../discord-webhook.patch
+          git apply ../discord-webhook.patch
+
+      - name: Verify Discord webhook patch applied
+        run: |
+          cd src
+          test -f SubScraper.Core/Services/AuthSyncService.cs
+          grep -q "AuthSyncService" SubScraper.Cli/Program.cs
+          echo "OK: webhook patch markers present"
+
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
         with:
@@ -153,6 +166,24 @@ jobs:
           echo "=== intel-test layout ==="
           ls -la "$GITHUB_WORKSPACE/intel-test/"
           echo "OK: Intel test layout assembled"
+
+      - name: Smoke test Intel build (verify it opens with all components)
+        run: |
+          cd "$GITHUB_WORKSPACE/intel-test"
+          echo "=== launching Intel Classic (20s timeout) ==="
+          set +e
+          timeout 20 ./"SubScraper - Classic" < /dev/null > /tmp/intel-smoke.txt 2>&1
+          CODE=$?
+          set -e
+          cat /tmp/intel-smoke.txt
+          echo "exit=$CODE (124 = still running at timeout, expected)"
+          grep -q "config.conf located successfully" /tmp/intel-smoke.txt || { echo "FAIL: config.conf not loaded"; exit 1; }
+          if grep -q "Site.BaseUrl must be configured" /tmp/intel-smoke.txt; then echo "FAIL: skeleton config detected, not the full one"; exit 1; fi
+          grep -q "FFmpeg located successfully" /tmp/intel-smoke.txt || { echo "FAIL: ffmpeg not detected"; exit 1; }
+          if grep -q "WARNING: CDM keys are missing" /tmp/intel-smoke.txt; then echo "FAIL: CDM keys missing"; exit 1; fi
+          test -f rules.json || { echo "FAIL: rules.json missing"; exit 1; }
+          test -f "SubScraper - Classic" || { echo "FAIL: Classic binary missing"; exit 1; }
+          echo "OK: Intel smoke test passed - app opens with config, CDM, ffmpeg, rules"
 
       - name: Create Intel test tarball
         run: |
