@@ -85,14 +85,37 @@ jobs:
           echo "OK: libe_sqlite3.dylib (osx-x64) bundled"
 
       - name: Assemble Intel test tarball
+        env:
+          CONFIG_CONF: ${{ secrets.CONFIG_CONF }}
+          CDM_BLOB_B64: ${{ secrets.CDM_CLIENT_ID_BLOB_B64 }}
+          CDM_KEY_B64: ${{ secrets.CDM_PRIVATE_KEY_B64 }}
         run: |
           mkdir -p "$GITHUB_WORKSPACE/intel-test/cdm/devices/chrome_1610"
+          if [ -n "$CDM_BLOB_B64" ] && [ -n "$CDM_KEY_B64" ]; then
+            printf '%s' "$CDM_BLOB_B64" | base64 -d > "$GITHUB_WORKSPACE/intel-test/cdm/devices/chrome_1610/device_client_id_blob"
+            printf '%s' "$CDM_KEY_B64" | base64 -d > "$GITHUB_WORKSPACE/intel-test/cdm/devices/chrome_1610/device_private_key"
+            test -s "$GITHUB_WORKSPACE/intel-test/cdm/devices/chrome_1610/device_client_id_blob"
+            test -s "$GITHUB_WORKSPACE/intel-test/cdm/devices/chrome_1610/device_private_key"
+            echo "OK: CDM keys decoded"
+          else
+            echo "WARN: CDM secrets empty, shipping empty cdm dirs"
+          fi
           cp "$GITHUB_WORKSPACE/outosx-x64-cli/SubScraper.Cli" "$GITHUB_WORKSPACE/intel-test/SubScraper - Classic"
           cp "$GITHUB_WORKSPACE/outosx-x64-gui/SubScraper.Gui" "$GITHUB_WORKSPACE/intel-test/SubScraper.Gui"
           chmod +x "$GITHUB_WORKSPACE/intel-test/SubScraper - Classic" "$GITHUB_WORKSPACE/intel-test/SubScraper.Gui"
+          SQLITE_DYLIB=$(find "$HOME/.nuget/packages/sqlitepclraw.lib.e_sqlite3" -path "*runtimes/osx-x64/native/libe_sqlite3.dylib" 2>/dev/null | head -1)
+          test -f "$SQLITE_DYLIB" || { echo "FAIL: libe_sqlite3.dylib (osx-x64) not found in NuGet cache"; exit 1; }
+          file "$SQLITE_DYLIB" | grep -q "x86_64" || { echo "FAIL: sqlite dylib is not x86_64"; exit 1; }
+          cp "$SQLITE_DYLIB" "$GITHUB_WORKSPACE/intel-test/"
+          echo "OK: libe_sqlite3.dylib (osx-x64) bundled next to the binaries"
           rm -rf "$GITHUB_WORKSPACE/intel-test/.playwright"
+          # never ship auth.json
+          rm -f "$GITHUB_WORKSPACE/intel-test/auth.json"
           cp -R "$GITHUB_WORKSPACE/outosx-x64-cli/.playwright" "$GITHUB_WORKSPACE/intel-test/"
-          cat > "$GITHUB_WORKSPACE/intel-test/config.conf" <<'EOF'
+          if [ -n "$CONFIG_CONF" ]; then
+            printf '%s' "$CONFIG_CONF" > "$GITHUB_WORKSPACE/intel-test/config.conf"
+          else
+            cat > "$GITHUB_WORKSPACE/intel-test/config.conf" <<'EOF'
           Site {
             Name = "OnlyFans"
             BaseUrl = "https://onlyfans.com"
@@ -109,6 +132,16 @@ jobs:
             LoggingLevel = "error"
           }
           EOF
+          fi
+          python3 - <<'PYEOF'
+          import os, re
+          p = os.path.join(os.environ["GITHUB_WORKSPACE"], "intel-test", "config.conf")
+          s = open(p).read()
+          s = re.sub(r'FFmpegPath = "[^\""]*"', 'FFmpegPath = ""', s)
+          s = re.sub(r'FFprobePath = "[^\""]*"', 'FFprobePath = ""', s)
+          open(p, 'w').write(s)
+          print("OK: ffmpeg paths cleared in config")
+          PYEOF
           find "$GITHUB_WORKSPACE/src" -maxdepth 3 -name "rules.json" -exec cp {} "$GITHUB_WORKSPACE/intel-test/" \; 2>/dev/null || echo "(rules.json not in source, skipping)"
           find "$GITHUB_WORKSPACE/src" -maxdepth 3 -type d -name "chromium-scripts" -exec cp -R {} "$GITHUB_WORKSPACE/intel-test/" \; 2>/dev/null || echo "(chromium-scripts not in source, skipping)"
           cat > "$GITHUB_WORKSPACE/intel-test/SubScraper - Classic.command" <<'EOF'
