@@ -56,6 +56,15 @@ jobs:
             -p:PublishSingleFile=true \
             -o ../outosx-x64-gui
 
+      - name: Package SubScraper.app (Intel)
+        run: |
+          cd src
+          chmod +x scripts/package-macos.sh
+          ./scripts/package-macos.sh \
+            "$GITHUB_WORKSPACE/outosx-x64-gui" \
+            "1.0.13-test" \
+            "$GITHUB_WORKSPACE/release-macos-intel"
+
       - name: Publish Classic CLI (osx-x64)
         run: |
           cd src
@@ -121,6 +130,12 @@ jobs:
           cp "$GITHUB_WORKSPACE/outosx-x64-cli/SubScraper.Cli" "$GITHUB_WORKSPACE/intel-test/SubScraper - Classic"
           cp "$GITHUB_WORKSPACE/outosx-x64-gui/SubScraper.Gui" "$GITHUB_WORKSPACE/intel-test/SubScraper.Gui"
           chmod +x "$GITHUB_WORKSPACE/intel-test/SubScraper - Classic" "$GITHUB_WORKSPACE/intel-test/SubScraper.Gui"
+          if [ -d "$GITHUB_WORKSPACE/release-macos-intel/SubScraper.app" ]; then
+            cp -R "$GITHUB_WORKSPACE/release-macos-intel/SubScraper.app" "$GITHUB_WORKSPACE/intel-test/"
+            echo "OK: SubScraper.app (Intel) bundled"
+          else
+            echo "WARN: SubScraper.app not found, skipping"
+          fi
           SQLITE_DYLIB=$(find "$HOME/.nuget/packages/sqlitepclraw.lib.e_sqlite3" -path "*runtimes/osx-x64/native/libe_sqlite3.dylib" 2>/dev/null | head -1)
           test -f "$SQLITE_DYLIB" || { echo "FAIL: libe_sqlite3.dylib (osx-x64) not found in NuGet cache"; exit 1; }
           file "$SQLITE_DYLIB" | grep -q "x86_64" || { echo "FAIL: sqlite dylib is not x86_64"; exit 1; }
