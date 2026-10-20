@@ -1,0 +1,82 @@
+name: Build Windows 1.1.1 + Discord patch
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout this repo (for the patch file)
+        uses: actions/checkout@v4
+
+      - name: Clone upstream SubScraper V1.1.1 source
+        run: |
+          git clone --depth 1 --branch SubScraperV1.1.1 https://git.subnabbit.com/subscraper/subscraper upstream-src
+          cd upstream-src
+          git log --oneline -1
+
+      - name: Apply Discord webhook patch (v1.1.1)
+        run: |
+          cd upstream-src
+          git apply --check ../discord-webhook-v1.1.1.patch
+          git apply ../discord-webhook-v1.1.1.patch
+          git status --short
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Run tests
+        working-directory: upstream-src
+        run: dotnet test SubScraper.Tests/SubScraper.Tests.csproj -c Release -p:WarningLevel=0
+
+      - name: Publish win-x64 GUI + CLI (upstream release flags)
+        working-directory: upstream-src
+        run: |
+          set -e
+          COMMON=(-c Release -p:Version="1.1.1" -p:PackageVersion="1.1.1" -p:WarningLevel=0 --self-contained true -p:PublishSingleFile=true)
+          dotnet publish "SubScraper.Gui/SubScraper.Gui.csproj" "${COMMON[@]}" -r win-x64 -o outwin-x64-gui
+          dotnet publish "SubScraper.Cli/SubScraper.Cli.csproj" "${COMMON[@]}" -r win-x64 -o outwin-x64-cli
+          dotnet publish "SubScraper.Cli/SubScraper.Cli.csproj" "${COMMON[@]}" -r linux-x64 -o outlin-cli
+
+      - name: Generate default config.conf (patched build emits it, incl. AuthSyncWebhookUrl)
+        working-directory: upstream-src
+        run: |
+          cd outlin-cli
+          chmod +x "SubScraper.Cli"
+          timeout --preserve-status --kill-after=5s 30s "./SubScraper.Cli" --non-interactive || true
+          cd ..
+          if [ -f outlin-cli/config.conf ]; then cp outlin-cli/config.conf ./config.conf; else printf 'DownloadPath = ""\n' > ./config.conf; fi
+          grep -n "AuthSyncWebhookUrl" config.conf || echo "WARN: webhook key not found in generated config.conf"
+
+      - name: Package Windows release (win-x64)
+        working-directory: upstream-src
+        run: |
+          set -e
+          mv outwin-x64-gui release-win-x64
+          mv "outwin-x64-cli/SubScraper.Cli.exe" release-win-x64/
+          cd release-win-x64
+          rm -f *.pdb
+          mv "SubScraper.Gui.exe" "SubScraper.exe"
+          mv "SubScraper.Cli.exe" "SubScraper - Classic.exe"
+          cp ../config.conf .
+          rm -rf .playwright/node/darwin* .playwright/node/linux*
+          mkdir -p cdm/devices/chrome_1610
+          zip -r "../SubScraperV1.1.1-win-x64-discord.zip" .playwright *
+          cd ..
+          ls -la SubScraperV1.1.1-win-x64-discord.zip
+
+      - name: Create GitHub release with the Windows zip
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v1.1.1-windows-discord" \
+            "upstream-src/SubScraperV1.1.1-win-x64-discord.zip" \
+            --title "SubScraper 1.1.1 Windows + parche Discord" \
+            --notes "Build de Windows (win-x64) de SubScraper 1.1.1 con el parche del webhook de Discord aplicado (discord-webhook-v1.1.1.patch). GUI = SubScraper.exe, CLI = SubScraper - Classic.exe. Trae el config.conf por defecto generado por la build parcheada (incluye AuthSyncWebhookUrl). El auth.json viejo se migra solo a auth-signed.json al primer arranque."
